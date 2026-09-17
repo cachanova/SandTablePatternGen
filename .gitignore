@@ -4,6 +4,18 @@ build-*/
 cmake-build-debug/
 .cache/
 
+# CMake artifacts from an in-source build
+/CMakeCache.txt
+/CMakeFiles/
+/CTestTestfile.cmake
+/Makefile
+/cmake_install.cmake
+/compile_commands.json
+/ThrGenCLI
+/ThrGenCpp
+/ThrGenCpp_Tests
+/libThrGenCore.a
+
 # Temp files
 *.png
 *.gif
