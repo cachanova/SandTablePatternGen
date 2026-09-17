@@ -2,6 +2,28 @@
 #include "../src/PathPlanner.h"
 #include <vector>
 #include <set>
+#include <algorithm>
+#include <cstdint>
+#include <random>
+
+namespace {
+// Golden hashes below were captured from the original planner at 7ebc0a3.
+// Hash coordinates in a fixed byte order so the fixtures work across platforms.
+void hash_value(uint64_t& hash, uint32_t value) {
+    for (int i = 0; i < 4; ++i) {
+        hash ^= (value >> (8 * i)) & 255;
+        hash *= UINT64_C(1099511628211);
+    }
+}
+
+void hash_path(uint64_t& hash, const std::vector<Point>& path) {
+    hash_value(hash, static_cast<uint32_t>(path.size()));
+    for (const auto& point : path) {
+        hash_value(hash, static_cast<uint32_t>(point.x));
+        hash_value(hash, static_cast<uint32_t>(point.y));
+    }
+}
+}
 
 TEST_CASE("PathPlanner::plan_path") {
     // Center is 50,50
@@ -112,4 +134,82 @@ TEST_CASE("PathPlanner filters invalid and duplicate points") {
     CHECK(visited.count({2, 1}) == 1);
     CHECK(visited.count({8, 8}) == 1);
     CHECK(PathPlanner::plan_path(points, 0, 10).empty());
+}
+
+TEST_CASE("PathPlanner preserves equal-distance choices and backtracking") {
+    const std::vector<Point> symmetric = {{3, 3}, {5, 3}, {3, 5}, {5, 5}};
+    const std::vector<Point> expected = {
+        {5, 5}, {5, 5}, {5, 4}, {5, 3}, {4, 3}, {3, 3}, {3, 4}, {3, 5}
+    };
+    CHECK(PathPlanner::plan_path(symmetric, 10, 10) == expected);
+
+    const std::vector<Point> separated = {{1, 1}, {2, 1}, {8, 8}};
+    const std::vector<Point> expected_backtrack = {
+        {5, 5}, {6, 6}, {7, 7}, {8, 8}, {7, 7}, {6, 6},
+        {5, 5}, {4, 4}, {3, 3}, {3, 2}, {2, 1}, {1, 1}
+    };
+    CHECK(PathPlanner::plan_path(separated, 10, 10) == expected_backtrack);
+}
+
+TEST_CASE("PathPlanner preserves routes at sampling and grid boundaries") {
+    // Two dense components cross bucket edges at x=15/16 and y=31/32.
+    // Their sizes straddle both sampling thresholds and require repeated BFS.
+    const int sizes[] = {20, 21, 100, 101};
+    const uint64_t expected[] = {
+        UINT64_C(9547738340907638307), UINT64_C(16578850442810686328),
+        UINT64_C(1942542137837662699), UINT64_C(17412214186856042472)
+    };
+    for (int trial = 0; trial < 4; ++trial) {
+        CAPTURE(sizes[trial]);
+        std::vector<Point> points;
+        for (int i = 0; i < sizes[trial]; ++i) {
+            points.push_back({15 + i % 10, 15 + i / 10});
+            points.push_back({55 + i % 10, 31 + i / 10});
+        }
+        const auto path = PathPlanner::plan_path(points, 96, 65);
+        uint64_t hash = UINT64_C(14695981039346656037);
+        hash_path(hash, path);
+        CHECK(hash == expected[trial]);
+        std::set<std::pair<int, int>> covered;
+        for (auto point : path) covered.emplace(point.x, point.y);
+        for (auto point : points) CHECK(covered.count({point.x, point.y}) == 1);
+    }
+}
+
+TEST_CASE("PathPlanner preserves original routes on deterministic point clouds") {
+    std::mt19937 random(20260917);
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (int trial = 0; trial < 80; ++trial) {
+        const int width = 2 + random() % 70;
+        const int height = 2 + random() % 70;
+        const int densities[] = {2, 10, 30, 70};
+        std::vector<Point> points;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                if (static_cast<int>(random() % 100) < densities[trial % 4]) {
+                    points.push_back({x, y});
+                }
+            }
+        }
+        if (trial % 3 == 0) {
+            points.push_back({-1, -1});
+            points.push_back({width, height});
+            points.push_back(points.front());
+        }
+        if (trial % 2) {
+            // Explicit shuffle avoids implementation-defined distributions in
+            // std::shuffle changing the fixture between standard libraries.
+            for (size_t n = points.size(); n > 1; --n) {
+                std::swap(points[n - 1], points[random() % n]);
+            }
+        }
+        const auto path = PathPlanner::plan_path(points, width, height);
+        hash_path(hash, path);
+        CAPTURE(trial);
+        for (size_t i = 1; i < path.size(); ++i) {
+            REQUIRE(std::abs(path[i].x - path[i - 1].x) <= 1);
+            REQUIRE(std::abs(path[i].y - path[i - 1].y) <= 1);
+        }
+    }
+    CHECK(hash == UINT64_C(3047006404827104613));
 }

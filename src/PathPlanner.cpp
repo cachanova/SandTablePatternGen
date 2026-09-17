@@ -1,5 +1,4 @@
 #include "PathPlanner.h"
-#include "Utils.h"
 #include <cmath>
 #include <limits>
 #include <algorithm>
@@ -36,13 +35,16 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
     }
     if (points.empty()) return {};
 
-    // Identify connected components. This pass is linear in the point count;
-    // keeping it sequential avoids data races in union-find parent traversal.
+    // Identify connected components sequentially to avoid parent-pointer races.
+    // Path halving preserves roots (and therefore component ordering).
     std::vector<int> dsu_parent(points.size());
     for (int i = 0; i < static_cast<int>(points.size()); ++i) dsu_parent[i] = i;
 
     auto dsu_find = [&](int i) {
-        while (dsu_parent[i] != i) i = dsu_parent[i];
+        while (dsu_parent[i] != i) {
+            dsu_parent[i] = dsu_parent[dsu_parent[i]];
+            i = dsu_parent[i];
+        }
         return i;
     };
 
@@ -180,6 +182,8 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
 
     int s3_count = 0;
     std::vector<int> parent(cell_count, -1);
+    std::vector<int> touched_parents;
+    std::vector<Point> search_points;
     while (remaining > 0) {
         Point next_p = {-1, -1};
         for (int dy = -1; dy <= 1; ++dy) {
@@ -207,8 +211,6 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                 Point visited{-1, -1};
                 double distance_sq = std::numeric_limits<double>::max();
             };
-            std::vector<Candidate> candidates(active_comp_indices.size());
-
             auto is_better = [](double distance, Point unvisited, Point visited,
                                 const Candidate& current) {
                 if (distance != current.distance_sq) return distance < current.distance_sq;
@@ -217,78 +219,88 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                                 current.visited.y, current.visited.x);
             };
 
-            Utils::parallel_for(0, (int)active_comp_indices.size(), [&](int i) {
-                int c_idx = active_comp_indices[i];
-                if (comp_remaining_counts[c_idx] == 0) return;
-                const auto& comp = components[c_idx];
-                Candidate& component_best = candidates[i];
-                
+            // Retain the existing samples and their order, including the first
+            // remaining point when every regular sample has been visited.
+            search_points.clear();
+            for (int cid : active_comp_indices) {
+                if (comp_remaining_counts[cid] == 0) continue;
+                const auto& comp = components[cid];
                 size_t step = 1;
                 if (comp.points.size() > 100) step = comp.points.size() / 10;
                 else if (comp.points.size() > 20) step = 4;
 
-                auto consider = [&](const Point& u) {
-                    if (visited[u.y * width + u.x]) return;
-
-                    int ux = u.x / GRID_SIZE;
-                    int uy = u.y / GRID_SIZE;
-                    double local_min_dist_sq = std::numeric_limits<double>::max();
-                    Point local_best_v = {-1, -1};
-
-                    bool found_in_radius = false;
-                    for (int r = 0; r < std::max(grid_cols, grid_rows); ++r) {
-                        if (found_in_radius && r > (int)(std::sqrt(local_min_dist_sq)/GRID_SIZE) + 1) break;
-
-                        for (int dy = -r; dy <= r; ++dy) {
-                            for (int dx = -r; dx <= r; ++dx) {
-                                if (std::abs(dx) < r && std::abs(dy) < r) continue;
-                                int gx = ux + dx, gy = uy + dy;
-                                if (gx >= 0 && gx < grid_cols && gy >= 0 && gy < grid_rows) {
-                                    for (const auto& v : spatial_grid[gy * grid_cols + gx]) {
-                                        double d2 = (double)(u.x-v.x)*(u.x-v.x) + (double)(u.y-v.y)*(u.y-v.y);
-                                        if (d2 < local_min_dist_sq ||
-                                            (d2 == local_min_dist_sq &&
-                                             std::tie(v.y, v.x) < std::tie(local_best_v.y, local_best_v.x))) {
-                                            local_min_dist_sq = d2;
-                                            local_best_v = v;
-                                            found_in_radius = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (local_best_v.x != -1 &&
-                        is_better(local_min_dist_sq, u, local_best_v, component_best)) {
-                        component_best = {u, local_best_v, local_min_dist_sq};
-                    }
-                };
-
-                bool considered_unvisited = false;
-                for (size_t point_index = 0; point_index < comp.points.size(); point_index += step) {
-                    const auto& u = comp.points[point_index];
-                    if (visited[u.y * width + u.x]) continue;
-                    considered_unvisited = true;
-                    consider(u);
+                const size_t previous_size = search_points.size();
+                for (size_t i = 0; i < comp.points.size(); i += step) {
+                    const auto& u = comp.points[i];
+                    if (!visited[u.y * width + u.x]) search_points.push_back(u);
                 }
-                // Sampling must not make the last unsampled points unreachable.
-                if (!considered_unvisited) {
+                if (search_points.size() == previous_size) {
                     for (const auto& u : comp.points) {
                         if (!visited[u.y * width + u.x]) {
-                            consider(u);
+                            search_points.push_back(u);
                             break;
                         }
                     }
                 }
-            });
+            }
 
             Candidate best;
-            for (const auto& candidate : candidates) {
-                if (candidate.unvisited.x != -1 &&
-                    is_better(candidate.distance_sq, candidate.unvisited,
-                              candidate.visited, best)) {
-                    best = candidate;
+            Candidate adjacent;
+            for (const auto& u : search_points) {
+                // The current position is in the path, so this is a real
+                // connection and a safe initial bound even before grid search.
+                const double distance = dist_sq(u, curr_p);
+                if (is_better(distance, u, curr_p, best)) best = {u, curr_p, distance};
+
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        Point v{u.x + dx, u.y + dy};
+                        if (v.x < 0 || v.x >= width || v.y < 0 || v.y >= height ||
+                            !is_in_path[v.y * width + v.x]) continue;
+                        const double d2 = dx * dx + dy * dy;
+                        if (is_better(d2, u, v, adjacent)) adjacent = {u, v, d2};
+                    }
+                }
+            }
+
+            // Unvisited edge points cannot already be in the path. Thus any
+            // adjacent pair (distance squared 1 or 2) beats every nonadjacent
+            // pair. The scan above resolves ties across ALL eligible samples.
+            if (adjacent.unvisited.x != -1) {
+                best = adjacent;
+            } else {
+                // Share a shrinking distance bound instead of launching fresh
+                // workers and independently finding each sample's nearest point.
+                for (const auto& u : search_points) {
+                    const int ux = u.x / GRID_SIZE, uy = u.y / GRID_SIZE;
+                    for (int r = 0; r < std::max(grid_cols, grid_rows); ++r) {
+                        // Conservative at bucket boundaries; keep equal distances
+                        // eligible for the original coordinate tie-break.
+                        if (r > static_cast<int>(std::sqrt(best.distance_sq) / GRID_SIZE) + 1) break;
+
+                        for (int dy = -r; dy <= r; ++dy) {
+                            // Top/bottom rows are full; interior rows visit only
+                            // the left/right perimeter cells (r=0 uses step 1).
+                            const int step = std::abs(dy) == r ? 1 : 2 * r;
+                            for (int dx = -r; dx <= r; dx += step) {
+                                const int gx = ux + dx, gy = uy + dy;
+                                if (gx < 0 || gx >= grid_cols || gy < 0 || gy >= grid_rows) continue;
+                                const int min_x = gx * GRID_SIZE;
+                                const int min_y = gy * GRID_SIZE;
+                                const int max_x = std::min(width - 1, min_x + GRID_SIZE - 1);
+                                const int max_y = std::min(height - 1, min_y + GRID_SIZE - 1);
+                                const double bx = u.x - std::clamp(u.x, min_x, max_x);
+                                const double by = u.y - std::clamp(u.y, min_y, max_y);
+                                if (bx * bx + by * by > best.distance_sq) continue;
+
+                                for (const auto& v : spatial_grid[gy * grid_cols + gx]) {
+                                    const double d2 = dist_sq(u, v);
+                                    if (is_better(d2, u, v, best)) best = {u, v, d2};
+                                }
+                            }
+                        }
+                    }
                 }
             }
             best_u = best.unvisited;
@@ -307,7 +319,11 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                     std::queue<Point> q;
                     q.push(curr_p);
                     
-                    std::fill(parent.begin(), parent.end(), -1);
+                    // Clear every enqueued entry from the previous BFS, even
+                    // those still in its frontier when the target was reached.
+                    for (int idx : touched_parents) parent[idx] = -1;
+                    touched_parents.clear();
+                    touched_parents.push_back(curr_p.y * width + curr_p.x);
                     
                     parent[curr_p.y * width + curr_p.x] = -2;
                     bool found = false;
@@ -322,6 +338,7 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                                     int nidx = ny * width + nx;
                                     if (is_in_path[nidx] && parent[nidx] == -1) {
                                         parent[nidx] = c.y * width + c.x;
+                                        touched_parents.push_back(nidx);
                                         q.push({nx, ny});
                                     }
                                 }

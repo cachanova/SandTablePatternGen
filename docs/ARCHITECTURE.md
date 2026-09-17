@@ -42,12 +42,16 @@ graph TD
 
 3.  **Path Planner (`PathPlanner.cpp`)**:
     -   **Goal**: Convert a cloud of edge points into a single continuous path.
-    -   **Stage 1: Component Labeling**: Uses a sequential DSU pass to group connected pixels without concurrent parent-pointer races.
+    -   **Stage 1: Component Labeling**: Uses a sequential DSU pass with path halving to group connected pixels without concurrent parent-pointer races. Roots remain unchanged, preserving component order.
     -   **Stage 2: Local Traversal**: Walks to adjacent unvisited edge pixels when possible.
     -   **Stage 3: Global Search**:
         -   Maintains a spatial grid of already-traversed path points for nearest-point search.
         -   Samples component points with a stride to reduce search cost on large components.
-        -   Uses BFS over existing path points to "backtrack" to the best connection point.
+        -   Retains the first unvisited point as a fallback when all regular samples in a component have been visited.
+        -   Seeds a shared distance bound with a real connection to the current path position. Adjacent pairs are resolved directly; longer searches enumerate grid-ring perimeters and skip cells whose minimum distance is worse than the bound.
+        -   Retains equal-distance candidates and uses the same coordinate tie-break, preserving the generated route.
+        -   Runs the reduced global search sequentially, avoiding fresh asynchronous workers on each restart.
+        -   Uses BFS over existing path points to "backtrack" to the best connection point. Only parent entries enqueued by the previous BFS are reset, including entries left in its frontier.
         -   Connects to the chosen target with a straight Bresenham segment to keep a continuous path.
 
 4.  **THR Generator (`ThrGenerator.cpp`)**:
@@ -67,11 +71,13 @@ graph TD
 
 ## Key Optimizations
 
--   **Multi-threading**: `Utils::parallel_for` distributes pixel-wise operations (grayscale, blur, Sobel, NMS), DSU unions, bridge-gap neighbor counts, and global search sampling across cores.
+-   **Multi-threading**: `Utils::parallel_for` distributes pixel-wise operations (grayscale, blur, Sobel, NMS), hysteresis seed collection, and bridge-gap neighbor counts across cores. Component labeling and bounded global path search are sequential.
 -   **Strided Sampling**: The global search samples every $K$-th point in large components to reduce scan cost.
 -   **Intelligent Resizing**: Images > 2048px are downscaled before processing to keep runtime interactive.
 -   **Spatial Index (Grid-of-Buckets)**: The planner uses a spatial grid of visited path points for near-neighbor lookup.
--   **Linear DSU Pass**: Component labeling avoids synchronization overhead and data races while remaining linear in the edge count.
+-   **DSU Path Halving**: Component labeling shortens parent chains without changing component roots or introducing synchronization overhead.
+-   **Bounded Global Search**: Exact cell-distance bounds, an adjacent-pair shortcut and perimeter traversal reduce search work while preserving the original sampling and tie-breaking rules.
+-   **Sparse BFS Reset**: Backtracking clears only entries touched by the previous search instead of the full image-sized parent array.
 -   **Native C++ Bilinear Downsampling**: Handles common resize operations without ImageMagick; ImageMagick remains a fallback for unsupported formats.
 -   **Bridge Gaps Optimization**: Spatial grid acceleration for endpoint bridging.
 -   **`std::vector<uint8_t>` over `std::vector<bool>`**: Avoids bit-packing overhead in parallel sections.
@@ -87,6 +93,9 @@ The server includes per-request timing instrumentation for each pipeline stage:
 -   `thumb_generation`: Thumbnail output
 
 Timing data is returned in the JSON response under the `timing` key and printed to the console.
+
+See [Planner performance and follow-up analysis](PLANNER_PERFORMANCE.md) for measured
+planning improvements, output-preservation checks and further routing proposals.
 
 ## Data Flow
 
