@@ -10,9 +10,22 @@ namespace {
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <numeric>
 
 namespace {
 constexpr size_t maxSamples = 50000000;
+// Dense tracks otherwise merge into a nearly solid field at display size.
+// Narrow their antialias profile while retaining the locations of
+// every sampled segment. Sparse drawings keep the original coverage profile.
+double strokeWidth(const std::vector<uint8_t> &alpha) {
+    const double coverage = std::accumulate(alpha.begin(), alpha.end(), 0.0) /
+                            (255.0 * alpha.size());
+    return 1.0 - .45 * std::clamp((coverage - .08) / .12, 0.0, 1.0);
+}
+uint8_t strokeCoverage(uint8_t alpha, double width) {
+    return static_cast<uint8_t>(std::lround(255.0 *
+        std::clamp(alpha / 255.0 - .5 + width / 2, 0.0, width)));
+}
 void stroke(std::vector<uint8_t> &alpha, int size, PreviewPoint a, PreviewPoint b) {
     const double dx = b.x - a.x, dy = b.y - a.y, square = dx * dx + dy * dy;
     const int x0 = std::max(0, static_cast<int>(std::floor(std::min(a.x, b.x) - 1)));
@@ -91,8 +104,9 @@ bool ThrPreview::png(const std::vector<ThrPoint> &points, const std::string &fil
         first = false;
     });
     std::vector<uint8_t> rgba(alpha.size() * 4, 255);
+    const double width = strokeWidth(alpha);
     for (size_t i = 0; i < alpha.size(); ++i)
-        rgba[i * 4 + 3] = alpha[i];
+        rgba[i * 4 + 3] = strokeCoverage(alpha[i], width);
     return stbi_write_png(filename.c_str(), size, size, 4, rgba.data(), size * 4) != 0;
 }
 
@@ -100,7 +114,17 @@ bool ThrPreview::gif(const std::vector<ThrPoint> &points, const std::string &fil
     if (size < 16 || size > 1024)
         throw std::invalid_argument("GIF size must be 16..1024");
     size_t samples = 0;
-    visit(points, size, [&](PreviewPoint) { ++samples; });
+    std::vector<uint8_t> alpha(static_cast<size_t>(size) * size, 0);
+    PreviewPoint previous{};
+    bool first = true;
+    visit(points, size, [&](PreviewPoint p) {
+        stroke(alpha, size, first ? p : previous, p);
+        previous = p;
+        first = false;
+        ++samples;
+    });
+    const double width = strokeWidth(alpha);
+    std::fill(alpha.begin(), alpha.end(), 0);
     const size_t perFrame = std::max<size_t>(1, (samples + 99) / 100);
     GifWriter writer{};
     if (!GifBegin(&writer, filename.c_str(), size, size, 5))
@@ -112,9 +136,9 @@ bool ThrPreview::gif(const std::vector<ThrPoint> &points, const std::string &fil
                 GifEnd(writer);
         }
     } close{&writer};
-    std::vector<uint8_t> alpha(static_cast<size_t>(size) * size, 0), frame(alpha.size() * 4, 255);
-    PreviewPoint previous{};
-    bool first = true, ok = true;
+    std::vector<uint8_t> frame(alpha.size() * 4, 255);
+    first = true;
+    bool ok = true;
     size_t index = 0;
     visit(points, size, [&](PreviewPoint p) {
         stroke(alpha, size, first ? p : previous, p);
@@ -123,9 +147,10 @@ bool ThrPreview::gif(const std::vector<ThrPoint> &points, const std::string &fil
         if (++index % perFrame && index != samples)
             return;
         for (size_t i = 0; i < alpha.size(); ++i) {
-            frame[i * 4] = static_cast<uint8_t>(50 + 180 * alpha[i] / 255);
-            frame[i * 4 + 1] = static_cast<uint8_t>(40 + 180 * alpha[i] / 255);
-            frame[i * 4 + 2] = static_cast<uint8_t>(30 + 170 * alpha[i] / 255);
+            const auto coverage = strokeCoverage(alpha[i], width);
+            frame[i * 4] = static_cast<uint8_t>(50 + 180 * coverage / 255);
+            frame[i * 4 + 1] = static_cast<uint8_t>(40 + 180 * coverage / 255);
+            frame[i * 4 + 2] = static_cast<uint8_t>(30 + 170 * coverage / 255);
         }
         for (int y = std::max(0, static_cast<int>(p.y) - 4);
              y < std::min(size, static_cast<int>(p.y) + 5); ++y)

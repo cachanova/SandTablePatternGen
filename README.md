@@ -95,7 +95,9 @@ All previews render the final serialized THR in polar coordinates. Full turns ar
 preserved; float coordinates map directly onto the 800px table overlay (center 400,
 radius 380), with at most 0.05 px geometric chord approximation before antialiasing.
 PNG pixel centers match browser canvas coordinates. Thumbnails use the same framing
-at 128 px. The renderer does not model approach moves, sand physics, or corner smoothing.
+at 128 px. Dense previews use thinner strokes (down to 0.55 pixels) to reduce solid
+fills while keeping every segment; sparse drawings retain one-pixel strokes.
+The renderer does not model approach moves, sand physics, or corner smoothing.
 
 The browser skips animation by default. `/process` and `/process_thr` accept
 `animation=0` or `1`; omitted values retain animation for existing callers. Both
