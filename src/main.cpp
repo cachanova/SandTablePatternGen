@@ -125,19 +125,17 @@ bool decode_image(const std::string& content, ImageData& image, std::string& err
     int height = 0;
     int channels = 0;
     if (stbi_info_from_memory(bytes, static_cast<int>(content.size()),
-                              &width, &height, &channels) != 0) {
-        if (width <= 0 || height <= 0 ||
-            static_cast<size_t>(width) * height > kMaxSourcePixels) {
-            error = "Image dimensions are too large";
-            return false;
-        }
+                              &width, &height, &channels) != 0 &&
+        width > 0 && height > 0 &&
+        static_cast<size_t>(width) * height <= kMaxSourcePixels) {
         unsigned char* raw = stbi_load_from_memory(bytes, static_cast<int>(content.size()),
                                                    &width, &height, &channels, 0);
         return normalize_image(raw, width, height, channels, image, error);
     }
 
-    // ImageMagick is retained only for formats stb_image cannot decode (for
-    // example HEIC). The filenames are generated internally and shell-quoted.
+    // ImageMagick handles formats stb_image cannot decode (for example HEIC)
+    // and downscales images too large to decode in-process, under resource
+    // limits. The filenames are generated internally and shell-quoted.
     TemporaryFiles temporary;
     const fs::path input = temporary.add(".upload");
     const fs::path output = temporary.add(".png");
@@ -149,7 +147,7 @@ bool decode_image(const std::string& content, ImageData& image, std::string& err
         }
     }
 
-    const std::string command = "magick -limit memory 512MiB -limit map 1GiB " +
+    const std::string command = "magick -limit memory 512MiB -limit map 1GiB -limit disk 4GiB " +
                                 shell_quote(input) + " -resize '2048x2048>' -strip " +
                                 shell_quote(output);
     if (std::system(command.c_str()) != 0) {
@@ -401,9 +399,26 @@ int main() {
         res.set_content(response.dump(), "application/json");
     });
 
-    std::cout << "Server started at http://localhost:8080\n";
-    if (!server.listen("0.0.0.0", 8080)) {
-        std::cerr << "Could not listen on port 8080\n";
+    // httplib's defaults include SO_REUSEPORT, which lets a second instance
+    // silently share the port; drop it so a conflict falls back to a free port.
+    server.set_socket_options([](socket_t sock) {
+        int yes = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+                   reinterpret_cast<const char*>(&yes), sizeof(yes));
+    });
+    int port = 8080;
+    if (!server.bind_to_port("0.0.0.0", port)) {
+        server.stop();  // a failed bind decommissions the server; stop() re-arms it
+        port = server.bind_to_any_port("0.0.0.0");
+        if (port < 0) {
+            std::cerr << "Could not bind to any port\n";
+            return 1;
+        }
+        std::cerr << "Port 8080 is in use; picked a free port instead\n";
+    }
+    std::cout << "Server started at http://localhost:" << port << std::endl;
+    if (!server.listen_after_bind()) {
+        std::cerr << "Could not listen on port " << port << '\n';
         return 1;
     }
     return 0;

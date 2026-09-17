@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Integration checks against an already-running ThrGenCpp server."""
 import json
+import os
 from pathlib import Path
 import struct
 import time
 import urllib.error
 import urllib.request
+import zlib
 
-BASE = 'http://127.0.0.1:8080'
+BASE = os.environ.get('THRGEN_BASE', 'http://127.0.0.1:8080')
 
 
 def process(route, name, data, fields):
@@ -26,6 +28,18 @@ def process(route, name, data, fields):
         response = e
     with response:
         return response.status, response.read(), time.monotonic()-start
+
+
+def big_png(width=8000, height=6000):
+    """A grayscale PNG above the 40-megapixel cap, with a rectangle to detect."""
+    rect = b'\x00' + b'\x00'*2000 + b'\xff'*4000 + b'\x00'*(width-6000)
+    blank = b'\x00' + b'\x00'*width
+    raw = b''.join(rect if 1500 <= y < 4500 else blank for y in range(height))
+    def chunk(tag, payload):
+        return struct.pack('>I', len(payload)) + tag + payload + struct.pack('>I', zlib.crc32(tag + payload))
+    header = struct.pack('>IIBBBBB', width, height, 8, 0, 0, 0, 0)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', header) +
+            chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
 
 
 def assets(result):
@@ -66,6 +80,13 @@ def main():
     imported = json.loads(imported)
     assert urllib.request.urlopen(BASE+result['png_url']).read() == urllib.request.urlopen(BASE+imported['png_url']).read()
     output['image_without_animation_seconds'] = seconds
+    # Oversized uploads must be downscaled server-side, never rejected.
+    status, body, seconds = process('/process', 'image', big_png(), {'animation': 0})
+    assert status == 200, body
+    result = json.loads(body)
+    assert max(result['width'], result['height']) <= 2048, result
+    assets(result)
+    output['oversized_image_seconds'] = seconds
     print(json.dumps(output, indent=2))
 
 
