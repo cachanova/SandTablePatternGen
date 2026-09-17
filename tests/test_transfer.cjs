@@ -61,3 +61,17 @@ test('names, address, sizes and non-PNG assets are validated',async()=>{
     opts.result.thr='0 0';responder=x=>x.reply(200,x.method==='GET'?new Blob(['not a png']):'{"success":true}');
     assert.match((await transfer.upload(opts))[0],/not a PNG/);
 });
+
+test('upload watchdog permits progressing transfers and times out stalled acknowledgements',async(t)=>{
+    t.mock.timers.enable({apis:['setTimeout']});
+    responder=()=>{};
+    const controller=new AbortController();
+    const pending=transfer.request('/save',{body:new FormData(),signal:controller.signal,timeout:0,stallTimeout:30000});
+    const rejected=assert.rejects(pending,/no progress.*outcome is unconfirmed/);
+    await Promise.resolve();
+    const xhr=requests[0];
+    for(let i=0;i<8;i++) { t.mock.timers.tick(29000); xhr.upload.onprogress({lengthComputable:true,loaded:i,total:8}); }
+    assert.equal(getEventListeners(controller.signal,'abort').length,1);
+    xhr.upload.onload();t.mock.timers.tick(30000);await rejected;
+    assert.equal(getEventListeners(controller.signal,'abort').length,0);
+});

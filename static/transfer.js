@@ -1,13 +1,14 @@
 /* Shared, bounded transport for processing and table uploads. */
 (function (root) {
     'use strict';
-    function request(url, {body, signal, timeout = 60000, responseType = 'json', onProgress, label = 'Request'} = {}) {
+    function request(url, {body, signal, timeout = 60000, stallTimeout = 0, responseType = 'json', onProgress, label = 'Request'} = {}) {
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
-            let settled = false;
+            let settled = false, stallTimer;
             const finish = (error, value) => {
                 if (settled) return;
                 settled = true;
+                clearTimeout(stallTimer);
                 signal?.removeEventListener('abort', abort);
                 error ? reject(error) : resolve(value);
             };
@@ -15,13 +16,24 @@
                 xhr.abort();
                 finish(new DOMException('Request cancelled', 'AbortError'));
             };
+            const resetStallTimer = () => {
+                if (!stallTimeout || settled) return;
+                clearTimeout(stallTimer);
+                stallTimer = setTimeout(() => {
+                    finish(new Error(`${label}: no progress for ${stallTimeout / 1000} seconds. The server may have accepted the request; its outcome is unconfirmed.`));
+                    xhr.abort();
+                }, stallTimeout);
+            };
             if (signal?.aborted) { abort(); return; }
             xhr.open(body === undefined ? 'GET' : 'POST', url);
             xhr.timeout = timeout;
             xhr.responseType = responseType === 'json' ? 'text' : responseType;
-            if (onProgress) xhr.upload.onprogress = event => {
-                if (event.lengthComputable) onProgress(event.loaded / event.total);
+            xhr.upload.onprogress = event => {
+                resetStallTimer();
+                if (event.lengthComputable) onProgress?.(event.loaded / event.total);
             };
+            xhr.upload.onload = resetStallTimer;
+            xhr.onprogress = resetStallTimer;
             xhr.onload = async () => {
                 try {
                     let value = xhr.response;
@@ -46,6 +58,7 @@
             xhr.ontimeout = () => finish(new Error(`${label}: timed out.${body === undefined ? '' : ' The server may have accepted the request; its outcome is unconfirmed.'}`));
             xhr.onabort = () => finish(new DOMException('Request cancelled', 'AbortError'));
             signal?.addEventListener('abort', abort, {once: true});
+            resetStallTimer();
             try { xhr.send(body); } catch (error) { finish(error); }
         });
     }
@@ -119,7 +132,7 @@
                 const query = file.id === 'thumb' ? '?thumbnail=1' : '';
                 onState(file.id, 'Sending', 0);
                 const acknowledgement = await request(`${origin}/api/files/upload${query}`, {
-                    body, signal, timeout: 120000, label: `Save ${file.label.toLowerCase()}`,
+                    body, signal, timeout: 0, stallTimeout: 30000, label: `Save ${file.label.toLowerCase()}`,
                     onProgress: fraction => onState(file.id, fraction >= 1 ? 'Saving on table' : 'Sending', fraction)
                 });
                 if (acknowledgement.success !== true) throw new Error('Table did not acknowledge a saved file.');
