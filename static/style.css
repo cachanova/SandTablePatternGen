@@ -352,3 +352,6 @@ input[type="range"]::-moz-range-thumb {
 @media (max-width: 560px) {
     .pipeline { grid-template-columns: 1fr; }
 }
+
+.animation-option { display: block; margin-top: 14px; color: var(--ink-soft); font-size: 12px; }
+.upload-progress-row > span:last-child { font-size: 11px; min-width: 62px; }

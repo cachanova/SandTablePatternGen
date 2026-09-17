@@ -3,7 +3,8 @@ let currentPngUrl = "";
 let currentThumbUrl = "";
 let abortController = null;
 let currentThrFile = null;
-let processing = false;
+let uploadReceipt = null;
+let selectionRevision = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
     const dropZone = document.getElementById('dropZone');
@@ -46,6 +47,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function handleImageFile(file) {
+        if (abortController) return;
         if (!file.type.startsWith('image/')) {
             alert("Please upload an image file");
             return;
@@ -64,27 +66,25 @@ document.addEventListener('DOMContentLoaded', () => {
         const baseName = originalName.substring(0, originalName.lastIndexOf('.')) || originalName;
         document.getElementById('patternName').value = baseName;
 
+        const revision = selectionRevision;
         const reader = new FileReader();
         reader.onload = (e) => {
+            if (revision !== selectionRevision) return;
             imagePreview.src = e.target.result;
             imagePreview.classList.remove('hidden');
             uploadPlaceholder.classList.add('hidden');
         };
         reader.readAsDataURL(file);
-        setNote('sourceNote', file.name);
+        setNote("sourceNote", file.name);
     }
 
-    // Keep the "Table" nav link pointed at the configured table address
-    const tableIpInput = document.getElementById('tableIp');
-    const tableLink = document.getElementById('tableLink');
-    if (tableIpInput && tableLink) {
-        const syncTableLink = () => {
-            const base = normalizeTableAddress(tableIpInput.value);
-            if (base) tableLink.href = base;
-        };
-        tableIpInput.addEventListener('change', syncTableLink);
-        syncTableLink();
-    }
+    const tableIp = document.getElementById('tableIp');
+    const syncTableLink = () => {
+        try { document.getElementById('tableLink').href = ThrGenTransfer.tableOrigin(tableIp.value.trim()); }
+        catch (_) { document.getElementById('tableLink').removeAttribute('href'); }
+    };
+    tableIp.addEventListener('change', syncTableLink);
+    syncTableLink();
 
     // THR File Drag and Drop
     const thrDropZone = document.getElementById('thrDropZone');
@@ -122,6 +122,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function handleThrFile(file) {
+        if (abortController) return;
         if (!file.name.toLowerCase().endsWith('.thr')) {
             alert("Please upload a .thr file");
             return;
@@ -139,51 +140,34 @@ document.addEventListener('DOMContentLoaded', () => {
         thrPlaceholder.classList.add('hidden');
         thrFileInfo.classList.remove('hidden');
         processThrBtn.disabled = false;
-        setNote('sourceNote', file.name);
+        setNote("sourceNote", file.name);
     }
 });
 
-function setNote(id, text) {
-    const el = document.getElementById(id);
-    if (el) el.textContent = text;
-}
-
-function normalizeTableAddress(value) {
-    const trimmed = (value || '').trim();
-    if (!trimmed) return null;
-    try {
-        const address = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-        const parsed = new URL(address);
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-        return parsed.origin;
-    } catch (_) {
-        return null;
-    }
-}
+function setNote(id, text) { document.getElementById(id).textContent = text; }
 
 function switchTab(tab) {
+    if (abortController) return;
+    clearGeneratedResult();
     const imageTab = document.getElementById('imageTab');
     const thrTab = document.getElementById('thrTab');
     const paramsCard = document.querySelector('.params-card');
-    const processBtn = document.getElementById('processBtn');
-    const processThrBtn = document.getElementById('processThrBtn');
     const tabBtns = document.querySelectorAll('.tab-btn');
 
+    document.getElementById('processBtn').classList.toggle('hidden', tab !== 'image');
+    document.getElementById('processThrBtn').classList.toggle('hidden', tab === 'image');
+    setNote('sourceNote', (tab === 'image' ? document.getElementById('imageInput').files[0] : currentThrFile)?.name || 'awaiting input');
     tabBtns.forEach(btn => btn.classList.remove('active'));
 
     if (tab === 'image') {
         imageTab.classList.remove('hidden');
         thrTab.classList.add('hidden');
         paramsCard.classList.remove('hidden');
-        processBtn.classList.remove('hidden');
-        processThrBtn.classList.add('hidden');
         tabBtns[0].classList.add('active');
     } else {
         imageTab.classList.add('hidden');
         thrTab.classList.remove('hidden');
         paramsCard.classList.add('hidden');
-        processBtn.classList.add('hidden');
-        processThrBtn.classList.remove('hidden');
         tabBtns[1].classList.add('active');
     }
 }
@@ -209,271 +193,119 @@ function updateStatus(message, details = "") {
 }
 
 function clearGeneratedResult() {
+    ++selectionRevision;
+    stopProcessing();
+    uploadReceipt = null;
     currentThrContent = "";
     currentPngUrl = "";
     currentThumbUrl = "";
     document.getElementById('downloadBtn').disabled = true;
     document.getElementById('uploadBtn').disabled = true;
-    // A new source invalidates the previous run: never show its stages next to it.
     for (const id of ['edgesCanvas', 'pathCanvas']) {
         const canvas = document.getElementById(id);
         canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
     }
-    const gifOutput = document.getElementById('gifOutput');
-    gifOutput.classList.add('hidden');
-    gifOutput.removeAttribute('src');
+    const preview = document.getElementById('gifOutput');
+    preview.classList.add('hidden');
+    preview.removeAttribute('src');
     document.getElementById('statsArea').classList.add('hidden');
+    document.getElementById('uploadProgressArea').classList.add('hidden');
     setNote('edgesNote', 'canny edge detection');
-    setNote('pathNote', 'traversal order · start → end');
+    setNote('pathNote', 'polar path preview');
+    setNote('tableNote', 'preview');
 }
 
 function stopProcessing() {
-    if (abortController) {
-        abortController.abort();
-        abortController = null;
-        updateStatus("Cancelled", "User stopped the process.");
-        cleanupUI();
+    abortController?.abort();
+}
+
+function setBusy(busy) {
+    document.querySelectorAll('#imageInput, #thrInput, #patternName, #tableIp, .tab-btn, #low, #lowNum, #high, #highNum, #blur, #blurNum, #includeAnimation, .reset-btn').forEach(node => node.disabled = busy);
+    document.getElementById('downloadBtn').disabled = busy || !currentThrContent;
+    document.getElementById('processBtn').disabled = busy;
+    document.getElementById('processThrBtn').disabled = busy || !currentThrFile;
+    document.getElementById('uploadBtn').disabled = busy || !currentThrContent;
+    document.getElementById('stopBtn').classList.toggle('hidden', !busy);
+    if (!busy) {
+        document.getElementById('loadingSpinner').classList.add('hidden');
+        document.getElementById('progressContainer').classList.add('hidden');
     }
 }
 
-function cleanupUI() {
-    document.getElementById('loadingSpinner').classList.add('hidden');
-    document.getElementById('progressContainer').classList.add('hidden');
+function processImage() {
+    const file = document.getElementById('imageInput').files[0];
+    if (!file) { updateStatus('Select an image first'); return; }
+    const body = new FormData();
+    body.append('image', file);
+    body.append('low_threshold', document.getElementById('low').value);
+    body.append('high_threshold', document.getElementById('high').value);
+    body.append('blur', document.getElementById('blur').value);
+    return processFile('/process', body);
+}
+
+function processThr() {
+    if (!currentThrFile) { updateStatus('Select a .thr file first'); return; }
+    const body = new FormData();
+    body.append('thr', currentThrFile);
+    return processFile('/process_thr', body);
+}
+
+async function processFile(url, body) {
+    if (abortController) return;
+    clearGeneratedResult();
+    const controller = new AbortController();
+    abortController = controller;
+    const {signal} = controller;
+    setBusy(true);
+    document.getElementById('uploadProgressArea').classList.add('hidden');
+    document.getElementById('gifOutput').classList.add('hidden');
+    document.getElementById('statsArea').classList.add('hidden');
+    document.getElementById('progressContainer').classList.remove('hidden');
     document.getElementById('progressBar').style.width = '0%';
-    document.getElementById('stopBtn').classList.add('hidden');
-    document.getElementById('processBtn').disabled = false;
-    document.getElementById('processThrBtn').disabled = !currentThrFile;
-}
-
-async function processImage() {
-    console.log("processImage called");
-    if (processing) return;
-    const input = document.getElementById('imageInput');
-    if (!input.files[0]) {
-        alert("Please select an image first");
-        return;
-    }
-    processing = true;
-
-    const processBtn = document.getElementById('processBtn');
-    const gifOutput = document.getElementById('gifOutput');
-    const stopBtn = document.getElementById('stopBtn');
-    const spinner = document.getElementById('loadingSpinner');
-    const progressContainer = document.getElementById('progressContainer');
-    const progressBar = document.getElementById('progressBar');
-    
-    // UI Reset
-    processBtn.disabled = true;
-    stopBtn.classList.remove('hidden');
-    progressContainer.classList.remove('hidden');
-    gifOutput.classList.add('hidden');
-    
-    updateStatus("Uploading...", "Sending image to server...");
-
-    // Setup AbortController
-    abortController = new AbortController();
-    const signal = abortController.signal;
-
-    const formData = new FormData();
-    formData.append('image', input.files[0]);
-    formData.append('low_threshold', document.getElementById('low').value);
-    formData.append('high_threshold', document.getElementById('high').value);
-    formData.append('blur', document.getElementById('blur').value);
-
+    body.append('animation', document.getElementById('includeAnimation').checked ? '1' : '0');
+    updateStatus('Sending source…');
     try {
-        const data = await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/process');
-            
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) {
-                    const percent = (e.loaded / e.total) * 100;
-                    progressBar.style.width = percent + '%';
-                    if (percent >= 100) {
-                        updateStatus("Processing...", "Server is analyzing image and generating path...");
-                        spinner.classList.remove('hidden');
-                        progressContainer.classList.add('hidden');
-                    }
+        const data = await ThrGenTransfer.request(url, {body, signal, timeout: 300000, label: 'Generate pattern',
+            onProgress: fraction => {
+                document.getElementById('progressBar').style.width = `${fraction * 100}%`;
+                if (fraction >= 1) {
+                    updateStatus('Generating pattern…');
+                    document.getElementById('loadingSpinner').classList.remove('hidden');
                 }
-            };
-
-            xhr.onload = () => {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    try {
-                        resolve(JSON.parse(xhr.responseText));
-                    } catch(e) {
-                        reject(new Error("Invalid server response"));
-                    }
-                } else {
-                    reject(new Error(xhr.responseText || `Server returned ${xhr.status}`));
-                }
-            };
-
-            xhr.onerror = () => reject(new Error("Network error"));
-            xhr.onabort = () => reject(new DOMException("Request cancelled", "AbortError"));
-
-            signal.addEventListener('abort', () => xhr.abort());
-
-            xhr.send(formData);
-        });
-
-        updateStatus("Finalizing...", "Generating visualization and animation...");
-        
-        currentThrContent = data.thr;
-        currentPngUrl = data.png_url;
-        currentThumbUrl = data.thumb_url || "";
-        
-        // Draw views
+            }});
+        if (signal.aborted) return;
+        if (!data.thr || !data.png_url || !Number.isInteger(data.point_count) || !data.width || !data.height) {
+            throw new Error('Incomplete generation response');
+        }
+        updateStatus('Drawing preview…');
         const size = Math.max(data.width, data.height);
-        drawEdges(data.edges || [], data.width, data.height, size);
-        drawPath(data.preview, data.width, data.height, size);
-        
-        // Set GIF
-        gifOutput.src = data.gif_url;
-        gifOutput.classList.remove('hidden');
-        
-        // Update stats
-        document.getElementById('pointCount').textContent = data.preview.length;
+        await drawEdges(data.edges || [], data.width, data.height, size, signal);
+        await drawPreviewImage(data.png_url, signal);
+        if (signal.aborted) return;
+        currentThrContent = data.thr;
+        currentPngUrl = data.png_url || '';
+        currentThumbUrl = data.thumb_url || '';
+        const preview = document.getElementById('gifOutput');
+        preview.src = data.gif_url || data.png_url;
+        preview.classList.remove('hidden');
+        document.getElementById('pointCount').textContent = data.point_count;
+        setNote('edgesNote', data.edges?.length ? `${data.edges.length.toLocaleString()} edge px` : 'imported .thr');
+        setNote('pathNote', `${data.point_count.toLocaleString()} points · polar path`);
+        setNote('tableNote', data.gif_url ? 'animation' : 'static preview');
         document.getElementById('statsArea').classList.remove('hidden');
-        setNote('sourceNote', `${input.files[0].name} · ${data.width}×${data.height}`);
-        setNote('edgesNote', `${(data.edges || []).length.toLocaleString()} edge px · canny ${document.getElementById('low').value}/${document.getElementById('high').value}`);
-        setNote('pathNote', `${data.preview.length.toLocaleString()} pts · start → end`);
-
-        const downloadBtn = document.getElementById('downloadBtn');
-        downloadBtn.disabled = false;
-        const uploadBtn = document.getElementById('uploadBtn');
-        uploadBtn.disabled = false;
-
-        updateStatus("Success!", `Processed at ${data.width}x${data.height}. Generated ${data.preview.length} points.`);
-
-    } catch (e) {
-        if (e.name === 'AbortError') {
-            // Handled in stopProcessing
-        } else {
-            updateStatus("Error", e.message);
-            alert("Error: " + e.message);
-        }
+        document.getElementById('downloadBtn').disabled = false;
+        updateStatus('Ready to upload', `${data.point_count} points. ${data.gif_url ? 'Animation included.' : 'Static preview ready.'}`);
+    } catch (error) {
+        updateStatus(error.name === 'AbortError' ? 'Cancelled' : 'Generation failed', error.name === 'AbortError' ? '' : error.message);
     } finally {
-        processing = false;
-        if (!signal.aborted) {
-            cleanupUI();
-        }
+        if (signal.aborted) updateStatus('Cancelled');
         abortController = null;
+        setBusy(false);
     }
 }
 
-async function processThr() {
-    if (processing) return;
-    if (!currentThrFile) {
-        alert("Please select a .thr file first");
-        return;
-    }
-    processing = true;
-
-    const processThrBtn = document.getElementById('processThrBtn');
-    const gifOutput = document.getElementById('gifOutput');
-    const stopBtn = document.getElementById('stopBtn');
-    const spinner = document.getElementById('loadingSpinner');
-    const progressContainer = document.getElementById('progressContainer');
-    const progressBar = document.getElementById('progressBar');
-
-    // UI Reset
-    processThrBtn.disabled = true;
-    stopBtn.classList.remove('hidden');
-    progressContainer.classList.remove('hidden');
-    progressBar.style.width = '0%';
-    gifOutput.classList.add('hidden');
-
-    updateStatus("Uploading...", "Sending .thr file to server...");
-
-    // Setup AbortController
-    abortController = new AbortController();
-    const signal = abortController.signal;
-
-    const formData = new FormData();
-    formData.append('thr', currentThrFile);
-
-    try {
-        const data = await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/process_thr');
-
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) {
-                    const percent = (e.loaded / e.total) * 100;
-                    progressBar.style.width = percent + '%';
-                    if (percent >= 100) {
-                        updateStatus("Processing...", "Generating visualization...");
-                        spinner.classList.remove('hidden');
-                        progressContainer.classList.add('hidden');
-                    }
-                }
-            };
-
-            xhr.onload = () => {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    try {
-                        resolve(JSON.parse(xhr.responseText));
-                    } catch(e) {
-                        reject(new Error("Invalid server response"));
-                    }
-                } else {
-                    reject(new Error(xhr.responseText || `Server returned ${xhr.status}`));
-                }
-            };
-
-            xhr.onerror = () => reject(new Error("Network error"));
-            xhr.onabort = () => reject(new DOMException("Request cancelled", "AbortError"));
-
-            signal.addEventListener('abort', () => xhr.abort());
-
-            xhr.send(formData);
-        });
-
-        updateStatus("Finalizing...", "Generating visualization and animation...");
-
-        currentThrContent = data.thr;
-        currentPngUrl = data.png_url;
-        currentThumbUrl = data.thumb_url || "";
-
-        // Draw views
-        const size = Math.max(data.width, data.height);
-        drawEdges(data.edges || [], data.width, data.height, size);
-        drawPath(data.preview, data.width, data.height, size);
-
-        // Set GIF
-        gifOutput.src = data.gif_url;
-        gifOutput.classList.remove('hidden');
-
-        // Update stats
-        document.getElementById('pointCount').textContent = data.preview.length;
-        document.getElementById('statsArea').classList.remove('hidden');
-        const thrEdges = (data.edges || []).length;
-        setNote('edgesNote', thrEdges ? `${thrEdges.toLocaleString()} edge px` : 'not applicable — imported .thr');
-        setNote('pathNote', `${data.preview.length.toLocaleString()} pts · start → end`);
-
-        const downloadBtn = document.getElementById('downloadBtn');
-        downloadBtn.disabled = false;
-        const uploadBtn = document.getElementById('uploadBtn');
-        uploadBtn.disabled = false;
-
-        updateStatus("Success!", `Generated preview with ${data.preview.length} points.`);
-
-    } catch (e) {
-        if (e.name === 'AbortError') {
-            // Handled in stopProcessing
-        } else {
-            updateStatus("Error", e.message);
-            alert("Error: " + e.message);
-        }
-    } finally {
-        processing = false;
-        if (!signal.aborted) {
-            cleanupUI();
-        }
-        abortController = null;
-    }
-}
+// Yield between batches so large previews do not freeze controls or cancellation.
+const yieldToBrowser = () => new Promise(resolve => setTimeout(resolve, 0));
 
 function resizeCanvas(canvas, size) {
     canvas.width = size;
@@ -484,50 +316,38 @@ function resizeCanvas(canvas, size) {
     return ctx;
 }
 
-function drawEdges(points, imgW, imgH, size) {
+async function drawEdges(points, imgW, imgH, size, signal) {
     const canvas = document.getElementById('edgesCanvas');
     const ctx = resizeCanvas(canvas, size);
     if (points.length === 0) return;
     const ox = (size - imgW) / 2;
     const oy = (size - imgH) / 2;
     ctx.fillStyle = '#1a1917';
-    for (const p of points) {
+    for (let i = 0; i < points.length; i++) {
+        if (i % 2048 === 0) { await yieldToBrowser(); if (signal.aborted) return; }
+        const p = points[i];
         ctx.fillRect(p[0] + ox, p[1] + oy, 1, 1);
     }
 }
 
-// Path traversal order runs from muted blue to muted red (firmware palette)
-const PATH_START_COLOR = [44, 79, 158];
-const PATH_END_COLOR = [158, 58, 46];
-
-function pathColor(f) {
-    const c = PATH_START_COLOR.map((s, i) => Math.round(s + f * (PATH_END_COLOR[i] - s)));
-    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
-}
-
-function drawPath(points, imgW, imgH, size) {
-    const canvas = document.getElementById('pathCanvas');
-    const ctx = resizeCanvas(canvas, size);
-    if (points.length === 0) return;
-    const ox = (size - imgW) / 2;
-    const oy = (size - imgH) / 2;
-    ctx.lineWidth = Math.max(1, size / 300);
-    ctx.lineCap = 'round';
-    const n = points.length;
-    // Last segment (i = n-2) must reach the full end color to match the end marker.
-    const denom = Math.max(1, n - 2);
-    for (let i = 0; i < n - 1; i++) {
-        ctx.beginPath();
-        ctx.moveTo(points[i][0] + ox, points[i][1] + oy);
-        ctx.lineTo(points[i+1][0] + ox, points[i+1][1] + oy);
-        ctx.strokeStyle = pathColor(i / denom);
-        ctx.stroke();
-    }
-    // Start/End markers
-    ctx.fillStyle = pathColor(0); ctx.beginPath();
-    ctx.arc(points[0][0] + ox, points[0][1] + oy, ctx.lineWidth * 3, 0, 2 * Math.PI); ctx.fill();
-    ctx.fillStyle = pathColor(1); ctx.beginPath();
-    ctx.arc(points[n-1][0] + ox, points[n-1][1] + oy, ctx.lineWidth * 3, 0, 2 * Math.PI); ctx.fill();
+async function drawPreviewImage(url, signal) {
+    const blob = await ThrGenTransfer.request(url, {signal, responseType: 'blob', timeout: 30000, label: 'Load preview'});
+    const bitmap = await createImageBitmap(blob);
+    try {
+        if (signal.aborted) return;
+        const canvas = document.getElementById('pathCanvas');
+        const ctx = resizeCanvas(canvas, 800);
+        // Tint the white transparent table overlay for the light path panel.
+        ctx.clearRect(0, 0, 800, 800);
+        ctx.drawImage(bitmap, 0, 0, 800, 800);
+        ctx.globalCompositeOperation = 'source-in';
+        ctx.fillStyle = '#1a1917';
+        ctx.fillRect(0, 0, 800, 800);
+        ctx.globalCompositeOperation = 'destination-over';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, 800, 800);
+        ctx.globalCompositeOperation = 'source-over';
+    } finally { bitmap.close(); }
 }
 
 function downloadThr() {
@@ -545,133 +365,38 @@ function downloadThr() {
 }
 
 async function uploadToTable() {
-    if (!currentThrContent) return;
-
-    const tableIp = document.getElementById('tableIp').value.trim();
-    if (!tableIp) {
-        alert("Please enter the Table IP address");
-        return;
-    }
-
-    const tableBase = normalizeTableAddress(tableIp);
-    if (!tableBase) {
-        alert("Please enter a valid table hostname or URL");
-        return;
-    }
-
-    const patternName = document.getElementById('patternName').value.trim() || 'track';
-    const uploadBtn = document.getElementById('uploadBtn');
-    const uploadProgressArea = document.getElementById('uploadProgressArea');
-    const thrProgressBar = document.getElementById('thrProgressBar');
-    const pngProgressBar = document.getElementById('pngProgressBar');
-
-    uploadBtn.disabled = true;
-    uploadProgressArea.classList.remove('hidden');
-    thrProgressBar.style.width = '0%';
-    pngProgressBar.style.width = '0%';
-    updateStatus("Uploading...", `Sending files to ${tableIp}...`);
-
+    if (!currentThrContent || abortController) return;
+    let origin, name;
     try {
-        // 1. Upload THR
-        updateStatus("Uploading...", `Uploading ${patternName}.thr...`);
-        const thrFormData = new FormData();
-        const thrBlob = new Blob([currentThrContent], { type: 'text/plain' });
-        thrFormData.append('file', thrBlob, patternName + ".thr");
-
-        await uploadWithProgress(
-            `${tableBase}/api/files/upload`,
-            thrFormData,
-            thrProgressBar
-        );
-
-        // 2. Upload PNG preview (if available)
-        if (currentPngUrl) {
-            updateStatus("Uploading...", `Uploading ${patternName}.png preview...`);
-            await uploadAssetToTable(currentPngUrl, patternName + ".png",
-                `${tableBase}/api/files/upload`, pngProgressBar);
-        } else {
-            pngProgressBar.style.width = '100%';
-        }
-
-        // 3. Upload thumbnail (if available). The firmware stores thumbnails per
-        // pattern: same <pattern>.png name, distinguished by the thumbnail=1 flag.
-        if (currentThumbUrl) {
-            updateStatus("Uploading...", "Uploading thumbnail...");
-            await uploadAssetToTable(currentThumbUrl, patternName + ".png",
-                `${tableBase}/api/files/upload?thumbnail=1`, null);
-        }
-
-        updateStatus("Upload Complete!", `Successfully uploaded files to table.`);
-        alert(`Successfully uploaded pattern and preview to table!`);
-    } catch (e) {
-        console.error("Upload failed", e);
-        updateStatus("Upload Failed", e.message);
-        alert("Upload failed: " + e.message);
-    } finally {
-        uploadBtn.disabled = false;
-        uploadProgressArea.classList.add('hidden');
-        thrProgressBar.style.width = '0%';
-        pngProgressBar.style.width = '0%';
+        origin = ThrGenTransfer.tableOrigin(document.getElementById('tableIp').value.trim());
+        name = ThrGenTransfer.patternBase(document.getElementById('patternName').value);
+    } catch (error) { updateStatus('Check upload settings', error.message); return; }
+    if (!uploadReceipt || uploadReceipt.origin !== origin || uploadReceipt.name !== name) {
+        uploadReceipt = {origin, name, completed: new Set()};
     }
-}
-
-// Fetch a generated asset from our server and upload it to the table.
-// Failures are tolerated: a missing preview must never fail an upload
-// whose .thr already landed on the table.
-async function uploadAssetToTable(assetUrl, uploadName, uploadUrl, progressBar) {
+    const receipt = uploadReceipt;
+    const result = {thr: currentThrContent, png: currentPngUrl, thumb: currentThumbUrl};
+    const controller = new AbortController();
+    abortController = controller;
+    setBusy(true);
+    document.getElementById('uploadProgressArea').classList.remove('hidden');
+    updateStatus('Uploading…', `Sending ${name} to ${origin}`);
     try {
-        const response = await fetch(assetUrl);
-        if (!response.ok) throw new Error(`Could not retrieve ${uploadName} (${response.status})`);
-        const blob = await response.blob();
-        const formData = new FormData();
-        formData.append('file', blob, uploadName);
-        await uploadWithProgress(uploadUrl, formData, progressBar);
-        return true;
+        const failures = await ThrGenTransfer.upload({origin, name, result,
+            completed: receipt.completed, signal: controller.signal,
+            onState: (id, state, fraction) => {
+                document.getElementById(`${id}ProgressBar`).style.width = `${fraction * 100}%`;
+                document.getElementById(`${id}UploadState`).textContent = state;
+            }});
+        updateStatus(failures.length ? 'Pattern saved; previews incomplete' : 'Upload complete',
+            failures.length ? `${failures.join(' ')} Click Upload to retry failed files.` : `${name} is saved on the table.`);
     } catch (error) {
-        console.warn(`${uploadName} upload failed, but the .thr was successful.`, error);
-        return false;
+        const saved = receipt.completed.has('thr') ? 'Pattern saved. ' : '';
+        updateStatus(error.name === 'AbortError' ? 'Upload cancelled' : 'Upload failed',
+            `${saved}${error.name === 'AbortError' ? 'An in-flight file may already be saved. Retry to finish.' : error.message}`);
+    } finally {
+        controller.abort(); // Release any preview fetches still in flight.
+        abortController = null;
+        setBusy(false);
     }
-}
-
-function uploadWithProgress(url, formData, progressBar) {
-    return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', url);
-
-        // Abort only when nothing has moved for a while: a slow but progressing
-        // upload (large file, weak table Wi-Fi) must be allowed to finish.
-        let stallTimer;
-        let stalled = false;
-        const resetStallTimer = () => {
-            clearTimeout(stallTimer);
-            stallTimer = setTimeout(() => { stalled = true; xhr.abort(); }, 30000);
-        };
-        resetStallTimer();
-
-        xhr.upload.onprogress = (e) => {
-            resetStallTimer();
-            if (e.lengthComputable && progressBar) {
-                progressBar.style.width = (e.loaded / e.total) * 100 + '%';
-            }
-        };
-        // The body is sent; give the table its own window to write and respond.
-        xhr.upload.onload = () => resetStallTimer();
-
-        xhr.onload = () => {
-            clearTimeout(stallTimer);
-            if (xhr.status >= 200 && xhr.status < 300) {
-                if (progressBar) progressBar.style.width = '100%';
-                resolve(xhr.responseText);
-            } else {
-                reject(new Error(`Upload failed: ${xhr.status}`));
-            }
-        };
-
-        xhr.onerror = () => { clearTimeout(stallTimer); reject(new Error("Network error")); };
-        xhr.onabort = () => {
-            clearTimeout(stallTimer);
-            reject(new Error(stalled ? "Upload stalled: no progress for 30 seconds" : "Upload cancelled"));
-        };
-        xhr.send(formData);
-    });
 }

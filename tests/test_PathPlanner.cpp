@@ -35,15 +35,8 @@ TEST_CASE("PathPlanner::plan_path") {
     CHECK(visited.count({50, 50}));
     CHECK(visited.count({70, 90}));
 
-    // Check continuity
-    // Bridges might introduce larger jumps if resolution is low, but generally should be small.
-    // The previous failure was checking dx<=1. 
-    // Bresenham ensures connectivity.
-    // My perimeter logic interpolation might not be perfect 1px.
-    // Let's relax the check slightly or trust the visual/logic. 
-    // Or just check that path isn't broken into massive chunks.
-    // Let's check average jump or max jump.
-    
+    // Every segment, including bridges between components, is rasterized with
+    // Bresenham and must remain 8-connected.
     int max_jump = 0;
     for(size_t i=0; i<path.size()-1; ++i) {
         int dx = std::abs(path[i].x - path[i+1].x);
@@ -51,9 +44,7 @@ TEST_CASE("PathPlanner::plan_path") {
         int jump = std::max(dx, dy);
         if (jump > max_jump) max_jump = jump;
     }
-    // We expect continuity in the logical path, but simplification creates jumps.
-    // A jump of 50-100 is expected between the distant components in this test.
-    CHECK(max_jump <= 100);
+    CHECK(max_jump <= 1);
 }
 
 TEST_CASE("PathPlanner::TraceBack") {
@@ -75,24 +66,50 @@ TEST_CASE("PathPlanner::TraceBack") {
     
     auto path = PathPlanner::plan_path(points, width, height);
     
-    // The path should:
-    // 1. Start near center (100, 100), go to U-shape.
-    // 2. Finish U-shape (say it ends at 150, 50).
-    // 3. Find that (50, 50) is closer to the detached segment than (150, 50).
-    // 4. Trace back from (150, 50) to (50, 50) through the U.
-    // 5. Jump to (40, 50).
-    
-    bool reached_end_of_u = false;
-    bool traced_back = false;
+    bool reached_left_end = false;
+    bool reached_right_end = false;
     bool reached_detached = false;
-    
+    std::set<std::pair<int, int>> unique_points;
+
     for(const auto& p : path) {
-        if (p.x == 150 && p.y == 50) reached_end_of_u = true;
-        if (reached_end_of_u && p.x == 50 && p.y == 50) traced_back = true;
+        if (p.x == 50 && p.y == 50) reached_left_end = true;
+        if (p.x == 150 && p.y == 50) reached_right_end = true;
         if (p.x == 40 && p.y == 50) reached_detached = true;
+        unique_points.insert({p.x, p.y});
     }
-    
-    CHECK(reached_end_of_u);
-    CHECK(traced_back);
+
+    CHECK(reached_left_end);
+    CHECK(reached_right_end);
     CHECK(reached_detached);
+    // Reconnecting to an earlier point in the U requires a deliberate retrace.
+    CHECK(path.size() > unique_points.size());
+    for (size_t i = 1; i < path.size(); ++i) {
+        CHECK(std::abs(path[i].x - path[i - 1].x) <= 1);
+        CHECK(std::abs(path[i].y - path[i - 1].y) <= 1);
+    }
+}
+
+TEST_CASE("PathPlanner filters invalid and duplicate points") {
+    const std::vector<Point> points = {
+        {1, 1}, {1, 1}, {2, 1}, {8, 8}, {-1, 0}, {10, 10}
+    };
+    const auto path = PathPlanner::plan_path(points, 10, 10);
+
+    REQUIRE(!path.empty());
+    std::set<std::pair<int, int>> visited;
+    for (size_t i = 0; i < path.size(); ++i) {
+        CHECK(path[i].x >= 0);
+        CHECK(path[i].x < 10);
+        CHECK(path[i].y >= 0);
+        CHECK(path[i].y < 10);
+        visited.insert({path[i].x, path[i].y});
+        if (i > 0) {
+            CHECK(std::abs(path[i].x - path[i - 1].x) <= 1);
+            CHECK(std::abs(path[i].y - path[i - 1].y) <= 1);
+        }
+    }
+    CHECK(visited.count({1, 1}) == 1);
+    CHECK(visited.count({2, 1}) == 1);
+    CHECK(visited.count({8, 8}) == 1);
+    CHECK(PathPlanner::plan_path(points, 0, 10).empty());
 }

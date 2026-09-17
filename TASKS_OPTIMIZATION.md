@@ -8,7 +8,7 @@ This document tracks performance optimizations for the ThrGen engine based on th
 - [x] Reuse a preallocated parent buffer for BFS backtracking over the existing path.
 
 ## 2. Parallelize Component Labeling & Hysteresis
-- [x] Use a parallel Disjoint Set Union (DSU) for component labeling with lock-based unions.
+- [x] Use a race-free linear Disjoint Set Union (DSU) pass for component labeling.
 - [x] Parallelize the strong-seed scan in hysteresis thresholding.
 
 ## 3. Imaging Pipeline Efficiency

@@ -3,11 +3,16 @@
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
+#include <stdexcept>
+#include <cerrno>
+#include <cstdlib>
 
-const double PI = 3.14159265358979323846;
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+}
 
 std::vector<ThrPoint> ThrGenerator::generate_thr(const std::vector<Point>& points, int width, int height) {
-    if (points.empty()) return {};
+    if (points.empty() || width <= 0 || height <= 0) return {};
 
     double center_x = width / 2.0;
     double center_y = height / 2.0;
@@ -33,8 +38,8 @@ std::vector<ThrPoint> ThrGenerator::generate_thr(const std::vector<Point>& point
         double theta = std::atan2(dy, dx);
 
         if (!first) {
-            while (theta - prev_theta > PI) theta -= 2 * PI;
-            while (theta - prev_theta < -PI) theta += 2 * PI;
+            while (theta - prev_theta > kPi) theta -= 2 * kPi;
+            while (theta - prev_theta < -kPi) theta += 2 * kPi;
         } else {
             first = false;
         }
@@ -71,15 +76,27 @@ std::vector<ThrPoint> ThrGenerator::parse(const std::string& thr_content) {
     std::istringstream stream(thr_content);
     std::string line;
 
+    size_t lineNumber=0;
     while (std::getline(stream, line)) {
-        // Skip empty lines and comments
-        if (line.empty() || line[0] == '#') continue;
-
-        std::istringstream line_stream(line);
-        double theta, rho;
-        if (line_stream >> theta >> rho) {
-            points.push_back({theta, rho});
-        }
+        ++lineNumber;
+        auto invalid=[&]() { throw std::invalid_argument("Invalid THR coordinate at line "+std::to_string(lineNumber)); };
+        if(line.size()>127 || line.find('\0')!=std::string::npos) invalid();
+        auto space=[](char c){return c==' '||c=='\t'||c=='\r';};
+        const char* p=line.c_str();
+        while(space(*p)) ++p;
+        if(!*p||*p=='#'||(*p=='/'&&p[1]=='/')) continue;
+        char* end=nullptr;errno=0;
+        const double theta=std::strtod(p,&end);
+        if(end==p||errno==ERANGE||(!space(*end)&&*end!=',')) invalid();
+        p=end;while(space(*p)) ++p;
+        if(*p==',') ++p;
+        while(space(*p)) ++p;
+        errno=0;const double rho=std::strtod(p,&end);
+        if(end==p||errno==ERANGE) invalid();
+        while(space(*end)) ++end;
+        if((*end&&*end!='#'&&!(*end=='/'&&end[1]=='/'))||!std::isfinite(theta)||
+           !std::isfinite(rho)||rho<0||rho>1) invalid();
+        points.push_back({theta,rho});
     }
 
     return points;
@@ -87,15 +104,19 @@ std::vector<ThrPoint> ThrGenerator::parse(const std::string& thr_content) {
 
 std::vector<Point> ThrGenerator::to_cartesian(const std::vector<ThrPoint>& thr_points, int width, int height) {
     std::vector<Point> points;
-    if (thr_points.empty()) return points;
+    if (thr_points.empty() || width <= 0 || height <= 0) return points;
 
     double center_x = width / 2.0;
     double center_y = height / 2.0;
     double max_radius = std::min(width, height) / 2.0;
 
     for (const auto& tp : thr_points) {
-        int x = static_cast<int>(center_x + std::cos(tp.theta) * tp.rho * max_radius);
-        int y = static_cast<int>(center_y + std::sin(tp.theta) * tp.rho * max_radius);
+        if (!std::isfinite(tp.theta) || !std::isfinite(tp.rho)) continue;
+        const double rho = std::clamp(tp.rho, 0.0, 1.0);
+        int x = static_cast<int>(std::lround(center_x + std::cos(tp.theta) * rho * max_radius));
+        int y = static_cast<int>(std::lround(center_y + std::sin(tp.theta) * rho * max_radius));
+        x = std::clamp(x, 0, width - 1);
+        y = std::clamp(y, 0, height - 1);
         points.push_back({x, y});
     }
 

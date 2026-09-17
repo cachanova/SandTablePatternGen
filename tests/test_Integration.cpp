@@ -7,6 +7,8 @@
 #include <iostream>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <unordered_set>
 
 void test_image_pipeline(const std::string& filename, int low, int high, int blur) {
     int width, height, channels;
@@ -25,6 +27,18 @@ void test_image_pipeline(const std::string& filename, int low, int high, int blu
 
     // 2. Path Planning
     auto path = PathPlanner::plan_path(edges, width, height);
+
+    std::unordered_set<uint64_t> path_points;
+    for (const auto& point : path) {
+        path_points.insert((static_cast<uint64_t>(static_cast<uint32_t>(point.y)) << 32) |
+                           static_cast<uint32_t>(point.x));
+    }
+    for (const auto& edge : edges) {
+        const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(edge.y)) << 32) |
+                             static_cast<uint32_t>(edge.x);
+        CHECK_MESSAGE(path_points.count(key) == 1,
+                      (std::string("Path omitted an edge in ") + filename).c_str());
+    }
     
     // 3. THR Generation
     auto thr = ThrGenerator::generate_thr(path, width, height);
@@ -47,7 +61,7 @@ void test_image_pipeline(const std::string& filename, int low, int high, int blu
             double dist = std::sqrt(dx*dx + dy*dy);
             if(dist > max_jump) max_jump = dist;
         }
-        CHECK(max_jump <= 1000.0);
+        CHECK(max_jump <= std::sqrt(2.0));
     }
 }
 

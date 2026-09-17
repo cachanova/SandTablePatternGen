@@ -7,7 +7,13 @@
 #include <vector>
 #include <algorithm>
 
-const double PI = 3.14159265358979323846;
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+
+bool valid_image(const unsigned char* data, int width, int height, int channels) {
+    return data != nullptr && width > 0 && height > 0 && channels > 0;
+}
+}
 
 std::vector<Point> EdgeDetector::detect_edges(const std::string& image_path, int low_threshold, int high_threshold, int blur_kernel_size) {
     int width, height, channels;
@@ -23,6 +29,18 @@ std::vector<Point> EdgeDetector::detect_edges(const std::string& image_path, int
 }
 
 std::vector<Point> EdgeDetector::detect_edges_from_memory(const unsigned char* data, int width, int height, int channels, int low_threshold, int high_threshold, int blur_kernel_size) {
+    if (!valid_image(data, width, height, channels) || width < 3 || height < 3) return {};
+
+    low_threshold = std::clamp(low_threshold, 0, 255);
+    high_threshold = std::clamp(high_threshold, 0, 255);
+    if (low_threshold > high_threshold) std::swap(low_threshold, high_threshold);
+
+    blur_kernel_size = std::max(1, blur_kernel_size);
+    if (blur_kernel_size % 2 == 0) ++blur_kernel_size;
+    int max_kernel = std::min(width, height);
+    if (max_kernel % 2 == 0) --max_kernel;
+    blur_kernel_size = std::min(blur_kernel_size, max_kernel);
+
     std::vector<uint8_t> gray = grayscale(data, width, height, channels);
     std::vector<uint8_t> blurred = gaussian_blur(gray, width, height, blur_kernel_size);
 
@@ -33,7 +51,7 @@ std::vector<Point> EdgeDetector::detect_edges_from_memory(const unsigned char* d
     std::vector<uint8_t> suppressed = non_max_suppression(magnitude, angle, width, height);
 
     // Mask borders to prevent frame detection
-    int margin = 5;
+    const int margin = std::min({5, width / 2, height / 2});
     for (int i = 0; i < margin; ++i) {
         for (int x = 0; x < width; ++x) {
             suppressed[i * width + x] = 0; // Top
@@ -46,26 +64,36 @@ std::vector<Point> EdgeDetector::detect_edges_from_memory(const unsigned char* d
     }
 
     std::vector<Point> edges = hysteresis(suppressed, width, height, low_threshold, high_threshold);
+    std::sort(edges.begin(), edges.end(), [](const Point& left, const Point& right) {
+        return left.y < right.y || (left.y == right.y && left.x < right.x);
+    });
     return bridge_gaps(edges, width, height, 10);
 }
 
 std::vector<uint8_t> EdgeDetector::resize(const unsigned char* data, int width, int height, int channels, int new_width, int new_height) {
-    std::vector<uint8_t> resized(new_width * new_height * channels);
-    float x_ratio = (float)(width - 1) / new_width;
-    float y_ratio = (float)(height - 1) / new_height;
+    if (!valid_image(data, width, height, channels) || new_width <= 0 || new_height <= 0) return {};
+
+    const size_t output_size = static_cast<size_t>(new_width) * new_height * channels;
+    std::vector<uint8_t> resized(output_size);
+    const float x_ratio = new_width > 1 ? static_cast<float>(width - 1) / (new_width - 1) : 0.0f;
+    const float y_ratio = new_height > 1 ? static_cast<float>(height - 1) / (new_height - 1) : 0.0f;
 
     Utils::parallel_for(0, new_height, [&](int i) {
         for (int j = 0; j < new_width; ++j) {
-            int x = (int)(x_ratio * j);
-            int y = (int)(y_ratio * i);
-            float x_diff = (x_ratio * j) - x;
-            float y_diff = (y_ratio * i) - y;
+            const float source_x = x_ratio * j;
+            const float source_y = y_ratio * i;
+            int x = static_cast<int>(source_x);
+            int y = static_cast<int>(source_y);
+            const int x1 = std::min(x + 1, width - 1);
+            const int y1 = std::min(y + 1, height - 1);
+            float x_diff = source_x - x;
+            float y_diff = source_y - y;
 
-            for (int c = 0; j < new_width && c < channels; ++c) {
+            for (int c = 0; c < channels; ++c) {
                 uint8_t a = data[(y * width + x) * channels + c];
-                uint8_t b = data[(y * width + x + 1) * channels + c];
-                uint8_t d = data[((y + 1) * width + x) * channels + c];
-                uint8_t e = data[((y + 1) * width + x + 1) * channels + c];
+                uint8_t b = data[(y * width + x1) * channels + c];
+                uint8_t d = data[(y1 * width + x) * channels + c];
+                uint8_t e = data[(y1 * width + x1) * channels + c];
 
                 float val = a * (1 - x_diff) * (1 - y_diff) +
                             b * (x_diff) * (1 - y_diff) +
@@ -94,43 +122,44 @@ std::vector<uint8_t> EdgeDetector::grayscale(const unsigned char* data, int widt
 }
 
 std::vector<uint8_t> EdgeDetector::gaussian_blur(const std::vector<uint8_t>& image, int width, int height, int kernel_size) {
-    if (kernel_size % 2 == 0) kernel_size++; 
+    if (kernel_size <= 1) return image;
     int r = kernel_size / 2;
     double sigma = std::max(1.0, kernel_size / 6.0); // Rough approximation
-    
-    std::vector<double> kernel(kernel_size * kernel_size);
+
+    // A separable Gaussian produces the same blur in O(k) work per pixel
+    // instead of O(k^2), and clamped sampling avoids artificial black borders.
+    std::vector<double> kernel(kernel_size);
     double sum = 0.0;
 
-    for (int y = -r; y <= r; ++y) {
-        for (int x = -r; x <= r; ++x) {
-            double val = (1.0 / (2.0 * PI * sigma * sigma)) * exp(-(x * x + y * y) / (2.0 * sigma * sigma));
-            kernel[(y + r) * kernel_size + (x + r)] = val;
-            sum += val;
-        }
+    for (int x = -r; x <= r; ++x) {
+        const double value = std::exp(-(x * x) / (2.0 * sigma * sigma));
+        kernel[x + r] = value;
+        sum += value;
     }
-
-    // Normalize
     for (double& k : kernel) k /= sum;
 
-    std::vector<uint8_t> output(width * height);
-
-    // Parallelize blur (iterate over rows)
-    Utils::parallel_for(r, height - r, [&](int y) {
-        const uint8_t* in_ptr = &image[y * width];
-        uint8_t* out_ptr = &output[y * width];
-        
-        for (int x = r; x < width - r; ++x) {
+    const size_t pixel_count = static_cast<size_t>(width) * height;
+    std::vector<float> horizontal(pixel_count);
+    Utils::parallel_for(0, height, [&](int y) {
+        for (int x = 0; x < width; ++x) {
             double val = 0.0;
-            // Manual unrolling of the kernel application for better speed
-            for (int ky = -r; ky <= r; ++ky) {
-                const uint8_t* row_ptr = &image[(y + ky) * width + (x - r)];
-                const double* kernel_ptr = &kernel[(ky + r) * kernel_size];
-                
-                for (int kx = 0; kx < kernel_size; ++kx) {
-                    val += row_ptr[kx] * kernel_ptr[kx];
-                }
+            for (int offset = -r; offset <= r; ++offset) {
+                const int source_x = std::clamp(x + offset, 0, width - 1);
+                val += image[static_cast<size_t>(y) * width + source_x] * kernel[offset + r];
             }
-            out_ptr[x] = static_cast<uint8_t>(val);
+            horizontal[static_cast<size_t>(y) * width + x] = static_cast<float>(val);
+        }
+    });
+
+    std::vector<uint8_t> output(pixel_count);
+    Utils::parallel_for(0, height, [&](int y) {
+        for (int x = 0; x < width; ++x) {
+            double val = 0.0;
+            for (int offset = -r; offset <= r; ++offset) {
+                const int source_y = std::clamp(y + offset, 0, height - 1);
+                val += horizontal[static_cast<size_t>(source_y) * width + x] * kernel[offset + r];
+            }
+            output[static_cast<size_t>(y) * width + x] = static_cast<uint8_t>(std::lround(val));
         }
     });
     return output;
@@ -167,7 +196,7 @@ std::vector<uint8_t> EdgeDetector::non_max_suppression(const std::vector<float>&
     // Parallelize suppression (iterate over rows)
     Utils::parallel_for(1, height - 1, [&](int y) {
         for (int x = 1; x < width - 1; ++x) {
-            float ang = angle[y * width + x] * 180.0 / PI;
+            float ang = angle[y * width + x] * 180.0 / kPi;
             if (ang < 0) ang += 180;
 
             float q = 255;

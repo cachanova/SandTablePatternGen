@@ -13,13 +13,12 @@
 
 namespace Utils {
 
+    inline std::once_flag thread_count_log_flag;
+
     // Timing report structure for collecting stage timings
     struct TimingReport {
         std::map<std::string, double> stages;
-        std::mutex mutex;
-
         void record(const std::string& stage, double ms) {
-            std::lock_guard<std::mutex> lock(mutex);
             stages[stage] = ms;
         }
 
@@ -38,16 +37,15 @@ namespace Utils {
         }
     };
 
-    // Global timing report (thread-safe)
+    // Each HTTP request is handled on one worker thread. Keeping the report
+    // thread-local prevents concurrent requests from clearing each other's data.
     inline TimingReport& get_timing_report() {
-        static TimingReport report;
+        thread_local TimingReport report;
         return report;
     }
 
     inline void clear_timing_report() {
-        auto& report = get_timing_report();
-        std::lock_guard<std::mutex> lock(report.mutex);
-        report.stages.clear();
+        get_timing_report().stages.clear();
     }
 
     class Timer {
@@ -95,26 +93,24 @@ namespace Utils {
         std::chrono::time_point<std::chrono::high_resolution_clock> start_;
     };
 
-    inline bool thread_count_printed = false;
-
     template <typename Index, typename Func>
     void parallel_for(Index start, Index end, Func&& f) {
+        if (end <= start) return;
+
         unsigned int num_threads = std::thread::hardware_concurrency();
-        
+
         if (num_threads == 0) {
-            if (!thread_count_printed) {
-                std::cerr << "Warning: std::thread::hardware_concurrency() failed to detect cores. Falling back to 2 threads." << std::endl;
-                thread_count_printed = true;
-            }
             num_threads = 2;
-        } else if (!thread_count_printed) {
-            std::cout << "Parallelizing across " << num_threads << " logical cores." << std::endl;
-            thread_count_printed = true;
+            std::call_once(thread_count_log_flag, [] {
+                std::cerr << "Warning: std::thread::hardware_concurrency() failed to detect cores. Falling back to 2 threads." << std::endl;
+            });
+        } else {
+            std::call_once(thread_count_log_flag, [num_threads] {
+                std::cout << "Parallelizing across " << num_threads << " logical cores." << std::endl;
+            });
         }
 
         Index range = end - start;
-        if (range == 0) return;
-
         if (range < static_cast<Index>(num_threads)) {
             num_threads = static_cast<unsigned int>(range);
         }

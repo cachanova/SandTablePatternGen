@@ -5,9 +5,7 @@
 #include <algorithm>
 #include <queue>
 #include <map>
-#include <set>
-#include <iostream>
-#include <mutex>
+#include <tuple>
 
 struct Component {
     int id;
@@ -21,26 +19,27 @@ static inline double dist_sq(Point p1, Point p2) {
     return dx * dx + dy * dy;
 }
 
-static inline double dist_sq_to_bbox(Point p, int min_x, int min_y, int max_x, int max_y) {
-    double dx = std::max(0, std::max(min_x - p.x, p.x - max_x));
-    double dy = std::max(0, std::max(min_y - p.y, p.y - max_y));
-    return dx * dx + dy * dy;
-}
-
 std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points, int width, int height) {
-    if (input_points.empty()) return {};
+    if (input_points.empty() || width <= 0 || height <= 0) return {};
 
-    // 1. Identify Components using DSU (Parallel)
-    std::vector<int> point_idx_map(width * height, -1);
-    for (int i = 0; i < (int)input_points.size(); ++i) {
-        const auto& p = input_points[i];
-        if (p.x >= 0 && p.x < width && p.y >= 0 && p.y < height)
-            point_idx_map[p.y * width + p.x] = i;
+    const size_t cell_count = static_cast<size_t>(width) * height;
+    std::vector<int> point_idx_map(cell_count, -1);
+    std::vector<Point> points;
+    points.reserve(input_points.size());
+    for (const auto& p : input_points) {
+        if (p.x < 0 || p.x >= width || p.y < 0 || p.y >= height) continue;
+        const size_t idx = static_cast<size_t>(p.y) * width + p.x;
+        if (point_idx_map[idx] == -1) {
+            point_idx_map[idx] = static_cast<int>(points.size());
+            points.push_back(p);
+        }
     }
+    if (points.empty()) return {};
 
-    std::vector<int> dsu_parent(input_points.size());
-    for (int i = 0; i < (int)input_points.size(); ++i) dsu_parent[i] = i;
-    std::mutex dsu_mutex;
+    // Identify connected components. This pass is linear in the point count;
+    // keeping it sequential avoids data races in union-find parent traversal.
+    std::vector<int> dsu_parent(points.size());
+    for (int i = 0; i < static_cast<int>(points.size()); ++i) dsu_parent[i] = i;
 
     auto dsu_find = [&](int i) {
         while (dsu_parent[i] != i) i = dsu_parent[i];
@@ -50,16 +49,11 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
     auto dsu_unite = [&](int i, int j) {
         int root_i = dsu_find(i);
         int root_j = dsu_find(j);
-        if (root_i != root_j) {
-            std::lock_guard<std::mutex> lock(dsu_mutex);
-            root_i = dsu_find(i);
-            root_j = dsu_find(j);
-            if (root_i != root_j) dsu_parent[root_i] = root_j;
-        }
+        if (root_i != root_j) dsu_parent[root_i] = root_j;
     };
 
-    Utils::parallel_for(0, (int)input_points.size(), [&](int i) {
-        const auto& p = input_points[i];
+    for (int i = 0; i < static_cast<int>(points.size()); ++i) {
+        const auto& p = points[i];
         for (int dy = -1; dy <= 1; ++dy) {
             for (int dx = -1; dx <= 1; ++dx) {
                 if (dx == 0 && dy == 0) continue;
@@ -72,12 +66,12 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                 }
             }
         }
-    });
+    }
 
     std::map<int, std::vector<Point>> component_map;
-    for (int i = 0; i < (int)input_points.size(); ++i) {
+    for (int i = 0; i < static_cast<int>(points.size()); ++i) {
         int root = dsu_find(i);
-        component_map[root].push_back(input_points[i]);
+        component_map[root].push_back(points[i]);
     }
 
     std::vector<Component> components;
@@ -100,9 +94,9 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
     if (components.empty()) return {};
 
     // 2. Setup for traversal
-    std::vector<uint8_t> has_point(width * height, 0);
-    std::vector<uint8_t> visited(width * height, 0);
-    std::vector<int> point_to_comp(width * height, -1);
+    std::vector<uint8_t> has_point(cell_count, 0);
+    std::vector<uint8_t> visited(cell_count, 0);
+    std::vector<int> point_to_comp(cell_count, -1);
     std::vector<int> comp_remaining_counts(components.size(), 0);
 
     for (const auto& comp : components) {
@@ -118,23 +112,23 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
 
     std::vector<int> active_comp_indices;
     for(size_t i=0; i<components.size(); ++i) {
-        if (comp_remaining_counts[i] > 0) active_comp_indices.push_back(i);
+        if (comp_remaining_counts[i] > 0) active_comp_indices.push_back(static_cast<int>(i));
     }
 
     int cx = width / 2;
     int cy = height / 2;
 
-    size_t remaining = input_points.size();
+    size_t remaining = points.size();
     Point curr_p = { cx, cy };
     std::vector<Point> path;
     path.push_back(curr_p);
-    std::vector<uint8_t> is_in_path(width * height, 0);
+    std::vector<uint8_t> is_in_path(cell_count, 0);
     is_in_path[curr_p.y * width + curr_p.x] = 1;
 
     const int GRID_SIZE = 16;
     int grid_cols = (width + GRID_SIZE - 1) / GRID_SIZE;
     int grid_rows = (height + GRID_SIZE - 1) / GRID_SIZE;
-    std::vector<std::vector<Point>> spatial_grid(grid_cols * grid_rows);
+    std::vector<std::vector<Point>> spatial_grid(static_cast<size_t>(grid_cols) * grid_rows);
     spatial_grid[(curr_p.y / GRID_SIZE) * grid_cols + (curr_p.x / GRID_SIZE)].push_back(curr_p);
 
     auto mark_visited = [&](int x, int y) {
@@ -171,12 +165,12 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
     {
         double min_d = std::numeric_limits<double>::max();
         int best_idx = -1;
-        for(size_t i=0; i<input_points.size(); ++i) {
-            double d = dist_sq(curr_p, input_points[i]);
-            if (d < min_d) { min_d = d; best_idx = i; }
+        for(size_t i=0; i<points.size(); ++i) {
+            double d = dist_sq(curr_p, points[i]);
+            if (d < min_d) { min_d = d; best_idx = static_cast<int>(i); }
         }
         if (best_idx != -1) {
-            Point target = input_points[best_idx];
+            Point target = points[best_idx];
             add_straight(curr_p, target);
             curr_p = target;
             path.push_back(curr_p);
@@ -185,6 +179,7 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
     }
 
     int s3_count = 0;
+    std::vector<int> parent(cell_count, -1);
     while (remaining > 0) {
         Point next_p = {-1, -1};
         for (int dy = -1; dy <= 1; ++dy) {
@@ -206,21 +201,34 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
             s3_count++;
             Point best_v = {-1, -1};
             Point best_u = {-1, -1};
-            double global_min_dist_sq = std::numeric_limits<double>::max();
-            std::mutex min_mutex;
+
+            struct Candidate {
+                Point unvisited{-1, -1};
+                Point visited{-1, -1};
+                double distance_sq = std::numeric_limits<double>::max();
+            };
+            std::vector<Candidate> candidates(active_comp_indices.size());
+
+            auto is_better = [](double distance, Point unvisited, Point visited,
+                                const Candidate& current) {
+                if (distance != current.distance_sq) return distance < current.distance_sq;
+                return std::tie(unvisited.y, unvisited.x, visited.y, visited.x) <
+                       std::tie(current.unvisited.y, current.unvisited.x,
+                                current.visited.y, current.visited.x);
+            };
 
             Utils::parallel_for(0, (int)active_comp_indices.size(), [&](int i) {
                 int c_idx = active_comp_indices[i];
                 if (comp_remaining_counts[c_idx] == 0) return;
                 const auto& comp = components[c_idx];
+                Candidate& component_best = candidates[i];
                 
                 size_t step = 1;
                 if (comp.points.size() > 100) step = comp.points.size() / 10;
                 else if (comp.points.size() > 20) step = 4;
 
-                for (size_t i = 0; i < comp.points.size(); i += step) {
-                    const auto& u = comp.points[i];
-                    if (visited[u.y * width + u.x]) continue;
+                auto consider = [&](const Point& u) {
+                    if (visited[u.y * width + u.x]) return;
 
                     int ux = u.x / GRID_SIZE;
                     int uy = u.y / GRID_SIZE;
@@ -230,11 +238,6 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                     bool found_in_radius = false;
                     for (int r = 0; r < std::max(grid_cols, grid_rows); ++r) {
                         if (found_in_radius && r > (int)(std::sqrt(local_min_dist_sq)/GRID_SIZE) + 1) break;
-                        {
-                            std::lock_guard<std::mutex> lock(min_mutex);
-                            if (found_in_radius && local_min_dist_sq >= global_min_dist_sq) break;
-                            if (!found_in_radius && (double)r * GRID_SIZE * r * GRID_SIZE > global_min_dist_sq) break;
-                        }
 
                         for (int dy = -r; dy <= r; ++dy) {
                             for (int dx = -r; dx <= r; ++dx) {
@@ -243,7 +246,9 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                                 if (gx >= 0 && gx < grid_cols && gy >= 0 && gy < grid_rows) {
                                     for (const auto& v : spatial_grid[gy * grid_cols + gx]) {
                                         double d2 = (double)(u.x-v.x)*(u.x-v.x) + (double)(u.y-v.y)*(u.y-v.y);
-                                        if (d2 < local_min_dist_sq) {
+                                        if (d2 < local_min_dist_sq ||
+                                            (d2 == local_min_dist_sq &&
+                                             std::tie(v.y, v.x) < std::tie(local_best_v.y, local_best_v.x))) {
                                             local_min_dist_sq = d2;
                                             local_best_v = v;
                                             found_in_radius = true;
@@ -254,16 +259,40 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                         }
                     }
 
-                    if (local_best_v.x != -1) {
-                        std::lock_guard<std::mutex> lock(min_mutex);
-                        if (local_min_dist_sq < global_min_dist_sq) {
-                            global_min_dist_sq = local_min_dist_sq;
-                            best_u = u;
-                            best_v = local_best_v;
+                    if (local_best_v.x != -1 &&
+                        is_better(local_min_dist_sq, u, local_best_v, component_best)) {
+                        component_best = {u, local_best_v, local_min_dist_sq};
+                    }
+                };
+
+                bool considered_unvisited = false;
+                for (size_t point_index = 0; point_index < comp.points.size(); point_index += step) {
+                    const auto& u = comp.points[point_index];
+                    if (visited[u.y * width + u.x]) continue;
+                    considered_unvisited = true;
+                    consider(u);
+                }
+                // Sampling must not make the last unsampled points unreachable.
+                if (!considered_unvisited) {
+                    for (const auto& u : comp.points) {
+                        if (!visited[u.y * width + u.x]) {
+                            consider(u);
+                            break;
                         }
                     }
                 }
             });
+
+            Candidate best;
+            for (const auto& candidate : candidates) {
+                if (candidate.unvisited.x != -1 &&
+                    is_better(candidate.distance_sq, candidate.unvisited,
+                              candidate.visited, best)) {
+                    best = candidate;
+                }
+            }
+            best_u = best.unvisited;
+            best_v = best.visited;
 
             if (best_u.x != -1) {
                 if (s3_count % 10 == 0) {
@@ -278,9 +307,7 @@ std::vector<Point> PathPlanner::plan_path(const std::vector<Point>& input_points
                     std::queue<Point> q;
                     q.push(curr_p);
                     
-                    static std::vector<int> parent;
-                    if (parent.size() != (size_t)width * height) parent.assign(width * height, -1);
-                    else std::fill(parent.begin(), parent.end(), -1);
+                    std::fill(parent.begin(), parent.end(), -1);
                     
                     parent[curr_p.y * width + curr_p.x] = -2;
                     bool found = false;

@@ -1,269 +1,410 @@
-#include "httplib.h"
-#include "json.hpp"
 #include "EdgeDetector.h"
+#include "ThrPreview.h"
 #include "PathPlanner.h"
 #include "ThrGenerator.h"
-#include "GifGenerator.h"
 #include "Utils.h"
+#include "httplib.h"
+#include "json.hpp"
 #include "stb_image.h"
-#include "stb_image_write.h"
 
-#include <iostream>
-#include <fstream>
-#include <string>
+#include <algorithm>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <climits>
 #include <cstdlib>
-#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <system_error>
+#include <vector>
 
+namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-int main() {
-    httplib::Server svr;
+namespace {
 
-    // Serve static files - check root or build directory
-    std::string static_path = "./static";
-    if (!std::ifstream("static/index.html").good()) {
-        if (std::ifstream("../static/index.html").good()) {
-            static_path = "../static";
+constexpr int kMaxDimension = 2048;
+constexpr size_t kMaxUploadBytes = size_t{25} * 1024 * 1024;
+constexpr size_t kMaxSourcePixels = size_t{40} * 1000 * 1000;
+constexpr size_t kMaxThrPoints = 500000;
+
+struct ImageData {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    std::vector<uint8_t> pixels;
+};
+
+class TemporaryFiles {
+public:
+    ~TemporaryFiles() {
+        std::error_code ec;
+        for (const auto& path : paths_) fs::remove(path, ec);
+    }
+
+    fs::path add(const std::string& suffix) {
+        static std::atomic<uint64_t> sequence{0};
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        fs::path path = fs::temp_directory_path() /
+                        ("thrgen_" + std::to_string(stamp) + "_" +
+                         std::to_string(sequence.fetch_add(1)) + suffix);
+        paths_.push_back(path);
+        return path;
+    }
+
+private:
+    std::vector<fs::path> paths_;
+};
+
+std::string shell_quote(const fs::path& path) {
+    std::string quoted = "'";
+    for (char c : path.string()) {
+        if (c == '\'') quoted += "'\\''";
+        else quoted += c;
+    }
+    return quoted + "'";
+}
+
+void error_response(httplib::Response& res, int status, const std::string& message) {
+    res.status = status;
+    res.set_content(message, "text/plain; charset=utf-8");
+}
+
+bool normalize_image(unsigned char* raw, int width, int height, int channels,
+                     ImageData& image, std::string& error) {
+    std::unique_ptr<unsigned char, decltype(&stbi_image_free)> owned(raw, stbi_image_free);
+    if (!raw || width <= 0 || height <= 0 || channels <= 0 || channels > 4) {
+        error = "Invalid image data";
+        return false;
+    }
+
+    const size_t pixel_count = static_cast<size_t>(width) * height;
+    if (pixel_count > kMaxSourcePixels) {
+        error = "Image dimensions are too large";
+        return false;
+    }
+
+    image.width = width;
+    image.height = height;
+    image.channels = channels;
+    if (width > kMaxDimension || height > kMaxDimension) {
+        const double ratio = std::min(static_cast<double>(kMaxDimension) / width,
+                                      static_cast<double>(kMaxDimension) / height);
+        image.width = std::max(1, static_cast<int>(width * ratio));
+        image.height = std::max(1, static_cast<int>(height * ratio));
+        image.pixels = EdgeDetector::resize(raw, width, height, channels,
+                                            image.width, image.height);
+    } else {
+        const size_t byte_count = pixel_count * static_cast<size_t>(channels);
+        image.pixels.assign(raw, raw + byte_count);
+    }
+
+    if (image.pixels.empty()) {
+        error = "Could not resize image";
+        return false;
+    }
+    return true;
+}
+
+bool decode_image(const std::string& content, ImageData& image, std::string& error) {
+    if (content.empty()) {
+        error = "The uploaded image is empty";
+        return false;
+    }
+    if (content.size() > kMaxUploadBytes || content.size() > static_cast<size_t>(INT_MAX)) {
+        error = "The uploaded image is too large";
+        return false;
+    }
+
+    const auto* bytes = reinterpret_cast<const unsigned char*>(content.data());
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    if (stbi_info_from_memory(bytes, static_cast<int>(content.size()),
+                              &width, &height, &channels) != 0) {
+        if (width <= 0 || height <= 0 ||
+            static_cast<size_t>(width) * height > kMaxSourcePixels) {
+            error = "Image dimensions are too large";
+            return false;
+        }
+        unsigned char* raw = stbi_load_from_memory(bytes, static_cast<int>(content.size()),
+                                                   &width, &height, &channels, 0);
+        return normalize_image(raw, width, height, channels, image, error);
+    }
+
+    // ImageMagick is retained only for formats stb_image cannot decode (for
+    // example HEIC). The filenames are generated internally and shell-quoted.
+    TemporaryFiles temporary;
+    const fs::path input = temporary.add(".upload");
+    const fs::path output = temporary.add(".png");
+    {
+        std::ofstream stream(input, std::ios::binary);
+        if (!stream || !stream.write(content.data(), static_cast<std::streamsize>(content.size()))) {
+            error = "Could not save the uploaded image";
+            return false;
         }
     }
-    
-    std::cout << "Mounting static files from: " << static_path << std::endl;
-    svr.set_mount_point("/", static_path);
 
-    // Default route for / to serve index.html explicitly
-    svr.Get("/", [static_path](const httplib::Request&, httplib::Response& res) {
-        std::ifstream ifs(static_path + "/index.html");
-        if (ifs.good()) {
-            std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-            res.set_content(content, "text/html");
-        } else {
-            res.status = 404;
-            res.set_content("Index file not found", "text/plain");
+    const std::string command = "magick -limit memory 512MiB -limit map 1GiB " +
+                                shell_quote(input) + " -resize '2048x2048>' -strip " +
+                                shell_quote(output);
+    if (std::system(command.c_str()) != 0) {
+        error = "Unsupported or invalid image format";
+        return false;
+    }
+
+    unsigned char* raw = stbi_load(output.string().c_str(), &width, &height, &channels, 0);
+    return normalize_image(raw, width, height, channels, image, error);
+}
+
+bool parse_parameter(const httplib::Request& req, const char* name, int default_value,
+                     int minimum, int maximum, int& value, std::string& error) {
+    if (!req.form.has_field(name)) {
+        value = default_value;
+        return true;
+    }
+    const std::string text = req.form.get_field(name);
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size() ||
+        value < minimum || value > maximum) {
+        error = std::string(name) + " must be an integer from " +
+                std::to_string(minimum) + " to " + std::to_string(maximum);
+        return false;
+    }
+    return true;
+}
+
+std::string unique_base_name() {
+    static std::atomic<uint64_t> sequence{0};
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return "sim_" + std::to_string(millis) + "_" +
+           std::to_string(sequence.fetch_add(1));
+}
+
+bool generate_assets(const std::vector<ThrPoint>& points, bool animation,
+                     const fs::path& static_path, const std::string& base_name,
+                     std::string& error) {
+    const fs::path gif = static_path / (base_name + ".gif");
+    const fs::path png = static_path / (base_name + ".png");
+    const fs::path thumb = static_path / (base_name + "_thumb.png");
+    try {
+        bool ok;
+        { Utils::Timer timer("png_generation", true, true); ok = ThrPreview::png(points, png.string()); }
+        { Utils::Timer timer("thumb_generation", true, true); ok = ThrPreview::png(points, thumb.string(), 128) && ok; }
+        if (animation) { Utils::Timer timer("gif_generation", true, true); ok = ThrPreview::gif(points, gif.string()) && ok; }
+        if (ok) return true;
+        error = "Could not write visualization files";
+    } catch (const std::exception& e) { error = e.what(); }
+    std::error_code ec;
+    fs::remove(gif, ec); fs::remove(png, ec); fs::remove(thumb, ec);
+    return false;
+}
+
+json path_json(const std::vector<Point>& points) {
+    json result = json::array();
+    for (const auto& point : points) result.push_back({point.x, point.y});
+    return result;
+}
+
+json timing_json() {
+    json timing;
+    const auto& report = Utils::get_timing_report();
+    for (const auto& stage : report.stages) timing[stage.first] = stage.second;
+    timing["total_ms"] = report.total_ms();
+    return timing;
+}
+
+fs::path find_static_path() {
+    for (const fs::path& candidate : {fs::path("static"), fs::path("../static")}) {
+        std::error_code ec;
+        if (fs::is_regular_file(candidate / "index.html", ec)) return fs::absolute(candidate);
+    }
+    return {};
+}
+
+} // namespace
+
+int main() {
+    const fs::path static_path = find_static_path();
+    if (static_path.empty()) {
+        std::cerr << "Could not find static/index.html. Run the server from the repository or build directory.\n";
+        return 1;
+    }
+
+    httplib::Server server;
+    server.set_payload_max_length(kMaxUploadBytes + size_t{1024} * 1024);
+    server.set_exception_handler([](const httplib::Request&, httplib::Response& res,
+                                    std::exception_ptr exception) {
+        try {
+            if (exception) std::rethrow_exception(exception);
+        } catch (const std::exception& e) {
+            std::cerr << "Request failed: " << e.what() << '\n';
+        } catch (...) {
+            std::cerr << "Request failed with an unknown exception\n";
         }
+        error_response(res, 500, "Internal server error");
     });
 
-    // Process endpoint
-    svr.Post("/process", [](const httplib::Request& req, httplib::Response& res) {
+    std::cout << "Mounting static files from: " << static_path << '\n';
+    if (!server.set_mount_point("/", static_path.string())) {
+        std::cerr << "Could not mount the static directory\n";
+        return 1;
+    }
+
+    server.Get("/", [static_path](const httplib::Request&, httplib::Response& res) {
+        std::ifstream stream(static_path / "index.html", std::ios::binary);
+        if (!stream) {
+            error_response(res, 404, "Index file not found");
+            return;
+        }
+        std::string content((std::istreambuf_iterator<char>(stream)),
+                            std::istreambuf_iterator<char>());
+        res.set_content(content, "text/html; charset=utf-8");
+    });
+
+    server.Post("/process", [static_path](const httplib::Request& req, httplib::Response& res) {
         if (!req.form.has_file("image")) {
-            res.status = 400;
-            res.set_content("No image file provided", "text/plain");
+            error_response(res, 400, "No image file provided");
             return;
         }
 
-        const auto& file = req.form.get_file("image");
-        int low = std::stoi(req.form.get_field("low_threshold"));
-        int high = std::stoi(req.form.get_field("high_threshold"));
-        int blur = std::stoi(req.form.get_field("blur"));
-
-        // Save original file
-        std::string upload_filename = "temp_upload"; 
-        {
-            std::ofstream ofs(upload_filename, std::ios::binary);
-            ofs.write(file.content.data(), file.content.size());
+        int low = 50;
+        int high = 150;
+        int blur = 5;
+        int animation = 1;
+        std::string error;
+        if (!parse_parameter(req, "low_threshold", 50, 0, 255, low, error) ||
+            !parse_parameter(req, "high_threshold", 150, 0, 255, high, error) ||
+            !parse_parameter(req, "blur", 5, 1, 15, blur, error) ||
+            !parse_parameter(req, "animation", 1, 0, 1, animation, error)) {
+            error_response(res, 400, error);
+            return;
+        }
+        if (low > high) {
+            error_response(res, 400, "low_threshold must not exceed high_threshold");
+            return;
+        }
+        if (blur % 2 == 0) {
+            error_response(res, 400, "blur must be an odd integer");
+            return;
         }
 
-        std::string target_file = upload_filename;
-        std::string converted_filename = "temp_processed.png";
-        
-        int width, height, channels;
-        bool needs_conversion = false;
-
-        // Check if stbi can load it and check dimensions
-        if (stbi_info(upload_filename.c_str(), &width, &height, &channels) == 1) {
-            if (width > 2048 || height > 2048) {
-                std::cout << "Image too large (" << width << "x" << height << "), resizing..." << std::endl;
-                needs_conversion = true;
-            }
-        } else {
-            std::cout << "stbi load failed (unsupported format), converting..." << std::endl;
-            needs_conversion = true;
+        ImageData image;
+        if (!decode_image(req.form.get_file("image").content, image, error)) {
+            error_response(res, 400, error);
+            return;
         }
 
-        if (needs_conversion) {
-            // Native C++ resizing
-            unsigned char* raw_data = stbi_load(upload_filename.c_str(), &width, &height, &channels, 0);
-            if (raw_data) {
-                int new_width = width, new_height = height;
-                if (width > 2048 || height > 2048) {
-                    float ratio = std::min(2048.0f / width, 2048.0f / height);
-                    new_width = (int)(width * ratio);
-                    new_height = (int)(height * ratio);
-                }
-                
-                auto resized = EdgeDetector::resize(raw_data, width, height, channels, new_width, new_height);
-                stbi_image_free(raw_data);
-                
-                // Save to temp_processed.png for the next steps (or refactor to use buffer directly)
-                stbi_write_png(converted_filename.c_str(), new_width, new_height, channels, resized.data(), new_width * channels);
-                target_file = converted_filename;
-            } else {
-                // Fallback to magick if stbi still can't load it (e.g. specialized WebP/HEIC)
-                std::string cmd = "magick " + upload_filename + " -resize '2048x2048>' -strip " + converted_filename;
-                if (std::system(cmd.c_str()) == 0) {
-                    target_file = converted_filename;
-                } else {
-                    res.status = 400;
-                    res.set_content("Image conversion/resizing failed", "text/plain");
-                    return;
-                }
-            }
-        }
-
-        // Get final dimensions (reload info to be sure of new size)
-        if (stbi_info(target_file.c_str(), &width, &height, &channels) == 0) {
-             res.status = 400;
-             res.set_content("Invalid image format or conversion failed", "text/plain");
-             return;
-        }
-
-        std::cout << "Processing image: " << width << "x" << height << std::endl;
-
-        // Clear timing report for this request
         Utils::clear_timing_report();
-
-        // Processing with timing
         std::vector<Point> edges;
         {
-            Utils::Timer t("edge_detection", true, true);
-            edges = EdgeDetector::detect_edges(target_file, low, high, blur);
+            Utils::Timer timer("edge_detection", true, true);
+            edges = EdgeDetector::detect_edges_from_memory(
+                image.pixels.data(), image.width, image.height, image.channels,
+                low, high, blur);
+        }
+        if (edges.empty()) {
+            error_response(res, 422, "No edges were detected; try lower thresholds or a clearer image");
+            return;
         }
 
         std::vector<Point> path;
         {
-            Utils::Timer t("path_planning", true, true);
-            path = PathPlanner::plan_path(edges, width, height);
+            Utils::Timer timer("path_planning", true, true);
+            path = PathPlanner::plan_path(edges, image.width, image.height);
+        }
+        if (path.empty()) {
+            error_response(res, 500, "Could not plan a path from the detected edges");
+            return;
         }
 
-        std::vector<ThrPoint> thr;
         std::string thr_content;
         {
-            Utils::Timer t("thr_generation", true, true);
-            thr = ThrGenerator::generate_thr(path, width, height);
-            thr_content = ThrGenerator::to_string(thr);
+            Utils::Timer timer("thr_generation", true, true);
+            thr_content = ThrGenerator::to_string(
+                ThrGenerator::generate_thr(path, image.width, image.height));
         }
 
-        // Generate GIF
-        std::time_t t = std::time(nullptr);
-        std::string base_name = "sim_" + std::to_string(t);
-        std::string gif_filename = "static/" + base_name + ".gif";
-        {
-            Utils::Timer timer("gif_generation", true, true);
-            GifGenerator::generate_gif(path, width, height, gif_filename);
+        if (thr_content.size() > 8U*1024*1024) {
+            error_response(res, 413, "Generated THR exceeds the table's 8 MiB upload limit; use a simpler image"); return;
         }
-        std::cout << "Generated GIF: " << gif_filename << std::endl;
-
-        // Generate PNG (white path on transparent background for table overlay)
-        std::string png_name = base_name + ".png";
-        std::string png_filename = "static/" + png_name;
-        {
-            Utils::Timer timer("png_generation", true, true);
-            GifGenerator::generate_png(path, width, height, png_filename);
+        const auto thr_points = ThrGenerator::parse(thr_content);
+        const std::string base_name = unique_base_name();
+        if (!generate_assets(thr_points, animation != 0, static_path, base_name, error)) {
+            error_response(res, 500, error);
+            return;
         }
-        std::cout << "Generated PNG: " << png_filename << std::endl;
 
-        // Print timing report
         Utils::get_timing_report().print();
-
-        // JSON response
         json response;
         response["thr"] = thr_content;
-        response["gif_url"] = "/" + base_name + ".gif"; 
+        if (animation) response["gif_url"] = "/" + base_name + ".gif";
         response["png_url"] = "/" + base_name + ".png";
-        
-        // Raw edges
-        std::vector<std::vector<int>> edges_preview;
-        for(const auto& p : edges) {
-            edges_preview.push_back({p.x, p.y});
-        }
-        response["edges"] = edges_preview;
-
-        // Path
-        std::vector<std::vector<int>> preview_path;
-        for(const auto& p : path) {
-            preview_path.push_back({p.x, p.y});
-        }
-        response["preview"] = preview_path;
-        response["width"] = width;
-        response["height"] = height;
-
-        // Add timing data to response
-        json timing;
-        const auto& report = Utils::get_timing_report();
-        for (const auto& p : report.stages) {
-            timing[p.first] = p.second;
-        }
-        timing["total_ms"] = report.total_ms();
-        response["timing"] = timing;
-
+        response["thumb_url"] = "/" + base_name + "_thumb.png";
+        response["edges"] = path_json(edges);
+        response["preview"] = json::array();
+        response["point_count"] = thr_points.size();
+        response["width"] = image.width;
+        response["height"] = image.height;
+        response["timing"] = timing_json();
         res.set_content(response.dump(), "application/json");
-        
-        // Cleanup
-        std::remove(upload_filename.c_str());
-        std::remove(converted_filename.c_str());
     });
 
-    // Process THR file endpoint - regenerate visualization from existing .thr
-    svr.Post("/process_thr", [](const httplib::Request& req, httplib::Response& res) {
+    server.Post("/process_thr", [static_path](const httplib::Request& req, httplib::Response& res) {
         if (!req.form.has_file("thr")) {
-            res.status = 400;
-            res.set_content("No THR file provided", "text/plain");
+            error_response(res, 400, "No THR file provided");
+            return;
+        }
+        const std::string& content = req.form.get_file("thr").content;
+        if (content.empty() || content.size() > 8U*1024*1024) {
+            error_response(res, 400, "The THR file must be nonempty and no larger than 8 MiB");
             return;
         }
 
-        const auto& file = req.form.get_file("thr");
-        std::string thr_content(file.content.data(), file.content.size());
-
-        // Parse the .thr file
-        auto thr_points = ThrGenerator::parse(thr_content);
-        if (thr_points.empty()) {
-            res.status = 400;
-            res.set_content("Invalid or empty THR file", "text/plain");
+        std::vector<ThrPoint> thr_points;
+        try { thr_points = ThrGenerator::parse(content); }
+        catch (const std::exception& e) { error_response(res, 400, e.what()); return; }
+        if (thr_points.empty() || thr_points.size() > kMaxThrPoints) {
+            error_response(res, 400, "The THR file has no valid points or too many points");
             return;
         }
 
-        // Use default dimensions (square canvas)
-        int width = 1024;
-        int height = 1024;
+        constexpr int size = 800;
+        Utils::clear_timing_report();
+        std::string error;
+        int animation = 1;
+        if (!parse_parameter(req, "animation", 1, 0, 1, animation, error)) {
+            error_response(res, 400, error); return;
+        }
+        const std::string base_name = unique_base_name();
+        if (!generate_assets(thr_points, animation != 0, static_path, base_name, error)) {
+            error_response(res, 500, error);
+            return;
+        }
 
-        // Convert polar to Cartesian for visualization
-        auto path = ThrGenerator::to_cartesian(thr_points, width, height);
-
-        std::cout << "Processing THR file: " << thr_points.size() << " points" << std::endl;
-
-        // Generate GIF
-        std::time_t t = std::time(nullptr);
-        std::string base_name = "sim_" + std::to_string(t);
-        std::string gif_filename = "static/" + base_name + ".gif";
-        GifGenerator::generate_gif(path, width, height, gif_filename);
-        std::cout << "Generated GIF: " << gif_filename << std::endl;
-
-        // Generate PNG
-        std::string png_name = base_name + ".png";
-        std::string png_filename = "static/" + png_name;
-        GifGenerator::generate_png(path, width, height, png_filename);
-        std::cout << "Generated PNG: " << png_filename << std::endl;
-
-        // JSON response
         json response;
-        response["thr"] = thr_content;
-        response["gif_url"] = "/" + base_name + ".gif";
+        response["thr"] = content;
+        if (animation) response["gif_url"] = "/" + base_name + ".gif";
         response["png_url"] = "/" + base_name + ".png";
-
-        // Path for preview
-        std::vector<std::vector<int>> preview_path;
-        for (const auto& p : path) {
-            preview_path.push_back({p.x, p.y});
-        }
-        response["preview"] = preview_path;
-        response["edges"] = json::array(); // No edges for THR import
-        response["width"] = width;
-        response["height"] = height;
-
+        response["thumb_url"] = "/" + base_name + "_thumb.png";
+        response["preview"] = json::array();
+        response["point_count"] = thr_points.size();
+        response["edges"] = json::array();
+        response["width"] = size;
+        response["height"] = size;
+        response["timing"] = timing_json();
         res.set_content(response.dump(), "application/json");
     });
 
-    std::cout << "Server started at http://localhost:8080" << std::endl;
-    svr.listen("0.0.0.0", 8080);
-
+    std::cout << "Server started at http://localhost:8080\n";
+    if (!server.listen("0.0.0.0", 8080)) {
+        std::cerr << "Could not listen on port 8080\n";
+        return 1;
+    }
     return 0;
 }

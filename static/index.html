@@ -61,7 +61,7 @@
                 <div class="stage-frame plate">
                     <canvas id="pathCanvas" width="440" height="440"></canvas>
                 </div>
-                <div class="stage-note" id="pathNote">traversal order &middot; start &rarr; end</div>
+                <div class="stage-note" id="pathNote">polar path preview</div>
             </div>
 
             <div>
@@ -122,6 +122,7 @@
 
             <section>
                 <h2 class="rule-head">Run</h2>
+                <label class="animation-option"><input type="checkbox" id="includeAnimation"> Include animation (slower)</label>
                 <div class="run-row">
                     <button id="processBtn" onclick="processImage()" class="btn primary run-btn">Generate</button>
                     <button id="processThrBtn" onclick="processThr()" class="btn primary run-btn hidden" disabled>Generate preview</button>
@@ -156,10 +157,17 @@
                     <div class="upload-progress-row">
                         <span class="upload-progress-label">.thr</span>
                         <div class="progress-rule"><div id="thrProgressBar" class="progress-rule-fill"></div></div>
+                        <span id="thrUploadState">Waiting</span>
                     </div>
                     <div class="upload-progress-row">
                         <span class="upload-progress-label">.png</span>
                         <div class="progress-rule"><div id="pngProgressBar" class="progress-rule-fill"></div></div>
+                        <span id="pngUploadState">Waiting</span>
+                    </div>
+                    <div class="upload-progress-row">
+                        <span class="upload-progress-label">thumb</span>
+                        <div class="progress-rule"><div id="thumbProgressBar" class="progress-rule-fill"></div></div>
+                        <span id="thumbUploadState">Waiting</span>
                     </div>
                 </div>
             </section>
@@ -171,12 +179,13 @@
             <ul>
                 <li>Images with clear outlines on a contrasting background work best.</li>
                 <li>Lower thresholds detect more edges &mdash; useful for faint lines.</li>
-                <li>The path stage shows traversal order: blue is the start (closest to center), red is the end.</li>
+                <li>The path preview preserves complete turns and curves from the final .thr file.</li>
                 <li>Anything outside the table&rsquo;s inscribed circle is clamped to the rim.</li>
             </ul>
         </footer>
     </main>
 
+    <script src="transfer.js"></script>
     <script src="script.js"></script>
 </body>
 </html>
