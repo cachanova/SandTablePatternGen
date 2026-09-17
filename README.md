@@ -13,7 +13,7 @@ A high-performance C++ tool for generating Sisyphus kinetic sand table tracks fr
     -   **Path Backtracking**: Uses BFS over existing path points to keep a continuous pen-down path.
     -   **Gap Bridging**: Connects nearby edge endpoints to reduce small discontinuities.
 -   **Modern Web Interface**:
-    -   **Dark Mode UI**: A professional, dark-themed interface.
+    -   **Paper & Ink UI**: A pipeline-style interface matching the Sisyphus table firmware's design language.
     -   **Drag-and-Drop**: Easy file upload support (images and `.thr` files).
     -   **Visualization**: View detected edges, the optimized path (gradient-colored for direction), and a simulated animation.
     -   **Zen Garden Simulation**: Generates an animated GIF showing a steel ball tracing the path on a sand bed.
@@ -65,7 +65,7 @@ make
 ### Web Server
 1.  Run the server: `./ThrGenCpp`
 2.  Open your browser to: `http://localhost:8080`
-3.  Upload an image and click "Generate Path".
+3.  Upload an image and click "Generate".
 
 ### CLI Tool
 Batch processing and visualization:

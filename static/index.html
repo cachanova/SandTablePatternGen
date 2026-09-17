@@ -3,206 +3,180 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ThrGen - Sisyphus THR Generator</title>
+    <title>ThrGen &middot; Sisyphus</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="app-container">
-        <header class="main-header">
-            <h1>ThrGen - Sisyphus THR Generator</h1>
-            <p>Convert images to .thr files for Sisyphus kinetic sand tables.</p>
-            <ol class="steps">
-                <li>Upload an image (works best with simple outlines/silhouettes)</li>
-                <li>Adjust edge detection thresholds if needed</li>
-                <li>Click "Generate" to process</li>
-                <li>Download the .thr file</li>
-            </ol>
-        </header>
+    <header class="topbar">
+        <div class="brand"><i>Sisyphus</i><span>ThrGen</span></div>
+        <nav class="topnav">
+            <a href="#" class="active">Generate</a>
+            <a href="http://sisyphus.local" id="tableLink" target="_blank" rel="noopener">Table &#8599;</a>
+        </nav>
+    </header>
 
-        <main class="gradio-layout">
-            <div class="left-col">
-                <!-- Input Tabs -->
-                <div class="input-tabs">
-                    <button class="tab-btn active" onclick="switchTab('image')">From Image</button>
-                    <button class="tab-btn" onclick="switchTab('thr')">From .thr File</button>
-                </div>
-
-                <!-- Input Image Card -->
-                <div class="card input-card" id="imageTab">
-                    <div class="card-header">
-                        <span class="icon">🖼️</span> Input Image
-                    </div>
-                    <div class="file-upload-area" id="dropZone">
-                        <input type="file" id="imageInput" accept="image/png, image/jpeg, image/webp" hidden>
-                        <div class="upload-placeholder">
-                            <span class="icon">📁</span>
-                            <p>Drop Image Here</p>
-                            <p class="sub-text">- or -</p>
-                            <p>Click to Upload</p>
-                        </div>
-                        <img id="imagePreview" class="hidden" alt="Preview">
-                    </div>
-                </div>
-
-                <!-- Input THR Card -->
-                <div class="card input-card hidden" id="thrTab">
-                    <div class="card-header">
-                        <span class="icon">📄</span> Input .thr File
-                    </div>
-                    <div class="file-upload-area" id="thrDropZone">
-                        <input type="file" id="thrInput" accept=".thr" hidden>
-                        <div class="upload-placeholder" id="thrPlaceholder">
-                            <span class="icon">📄</span>
-                            <p>Drop .thr File Here</p>
-                            <p class="sub-text">- or -</p>
-                            <p>Click to Upload</p>
-                        </div>
-                        <div id="thrFileInfo" class="thr-file-info hidden">
-                            <span class="icon">📄</span>
-                            <p id="thrFileName"></p>
-                        </div>
-                    </div>
-                    <div class="thr-actions">
-                        <button id="processThrBtn" onclick="processThr()" class="primary-btn" disabled>Generate Preview</button>
-                    </div>
-                </div>
-
-                <!-- Parameters Card -->
-                <div class="card params-card">
-                    <div class="control-group">
-                        <div class="label-row">
-                            <label>Low Threshold</label>
-                            <div class="val-input-wrap">
-                                <input type="number" id="lowNum" value="50" min="1" max="255">
-                                <button class="reset-btn" onclick="resetParam('low')">🔄</button>
+    <main>
+        <!-- ── Pipeline stages ── -->
+        <div class="pipeline">
+            <div>
+                <div class="stage-num">01 <b>Source</b></div>
+                <div class="stage-frame plate">
+                    <div id="imageTab" class="frame-fill">
+                        <div class="dropzone frame-fill" id="dropZone">
+                            <input type="file" id="imageInput" accept="image/png, image/jpeg, image/webp" hidden>
+                            <div class="upload-placeholder">
+                                <div class="dz-title">Drop an image here</div>
+                                <div class="dz-sub">or click to browse<br>png &middot; jpeg &middot; webp</div>
                             </div>
+                            <img id="imagePreview" class="hidden" alt="Source image preview">
+                        </div>
+                    </div>
+                    <div id="thrTab" class="frame-fill hidden">
+                        <div class="dropzone frame-fill" id="thrDropZone">
+                            <input type="file" id="thrInput" accept=".thr" hidden>
+                            <div class="upload-placeholder" id="thrPlaceholder">
+                                <div class="dz-title">Drop a .thr file here</div>
+                                <div class="dz-sub">or click to browse</div>
+                            </div>
+                            <div id="thrFileInfo" class="thr-file-info hidden">
+                                <div class="dz-title" id="thrFileName"></div>
+                                <div class="dz-sub">.thr file loaded</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="stage-note" id="sourceNote">awaiting input</div>
+            </div>
+
+            <div>
+                <div class="stage-num">02 <b>Edges</b></div>
+                <div class="stage-frame plate">
+                    <canvas id="edgesCanvas" width="440" height="440"></canvas>
+                </div>
+                <div class="stage-note" id="edgesNote">canny edge detection</div>
+            </div>
+
+            <div>
+                <div class="stage-num">03 <b>Path</b></div>
+                <div class="stage-frame plate">
+                    <canvas id="pathCanvas" width="440" height="440"></canvas>
+                </div>
+                <div class="stage-note" id="pathNote">traversal order &middot; start &rarr; end</div>
+            </div>
+
+            <div>
+                <div class="stage-num">04 <b>Table</b></div>
+                <div class="stage-frame table-round">
+                    <img id="gifOutput" class="hidden" alt="Table simulation">
+                </div>
+                <div class="stage-note" id="tableNote">simulation</div>
+            </div>
+        </div>
+
+        <!-- ── Controls ── -->
+        <div class="controls">
+            <section>
+                <h2 class="rule-head">Source &amp; parameters</h2>
+                <div class="seg">
+                    <button class="tab-btn active" onclick="switchTab('image')">From image</button>
+                    <button class="tab-btn" onclick="switchTab('thr')">From .thr file</button>
+                </div>
+
+                <div class="params-card">
+                    <div class="slider-section">
+                        <div class="slider-header">
+                            <span>Low threshold</span>
+                            <span class="val-input-wrap">
+                                <input type="number" class="num-input" id="lowNum" value="50" min="1" max="255" aria-label="Low threshold value">
+                                <button class="reset-btn" onclick="resetParam('low')" title="Reset to 50" aria-label="Reset low threshold">&#8634;</button>
+                            </span>
                         </div>
                         <input type="range" id="low" min="1" max="255" value="50">
-                        <p class="help-text">Minimum intensity to <em>continue</em> a line. Points between Low and High are kept only if they connect to a strong edge. Higher values reduce "fuzz" but may break faint lines.</p>
+                        <div class="slider-help">Minimum intensity to <em>continue</em> a line. Points between Low and High are kept only if they connect to a strong edge. Higher values reduce fuzz but may break faint lines.</div>
                     </div>
 
-                    <div class="control-group">
-                        <div class="label-row">
-                            <label>High Threshold</label>
-                            <div class="val-input-wrap">
-                                <input type="number" id="highNum" value="150" min="1" max="255">
-                                <button class="reset-btn" onclick="resetParam('high')">🔄</button>
-                            </div>
+                    <div class="slider-section">
+                        <div class="slider-header">
+                            <span>High threshold</span>
+                            <span class="val-input-wrap">
+                                <input type="number" class="num-input" id="highNum" value="150" min="1" max="255" aria-label="High threshold value">
+                                <button class="reset-btn" onclick="resetParam('high')" title="Reset to 150" aria-label="Reset high threshold">&#8634;</button>
+                            </span>
                         </div>
                         <input type="range" id="high" min="1" max="255" value="150">
-                        <p class="help-text">Minimum intensity to <em>start</em> a line. Any pixel above this is a guaranteed "strong" edge. Higher values capture only the most prominent outlines.</p>
+                        <div class="slider-help">Minimum intensity to <em>start</em> a line. Any pixel above this is a guaranteed strong edge. Higher values keep only the most prominent outlines.</div>
                     </div>
 
-                    <div class="control-group">
-                        <div class="label-row">
-                            <label>Blur Kernel</label>
-                            <div class="val-input-wrap">
-                                <input type="number" id="blurNum" value="5" min="1" max="15" step="2">
-                                <button class="reset-btn" onclick="resetParam('blur')">🔄</button>
-                            </div>
+                    <div class="slider-section">
+                        <div class="slider-header">
+                            <span>Blur kernel</span>
+                            <span class="val-input-wrap">
+                                <input type="number" class="num-input" id="blurNum" value="5" min="1" max="15" step="2" aria-label="Blur kernel value">
+                                <button class="reset-btn" onclick="resetParam('blur')" title="Reset to 5" aria-label="Reset blur kernel">&#8634;</button>
+                            </span>
                         </div>
                         <input type="range" id="blur" min="1" max="15" step="2" value="5">
                     </div>
-
-                    <button id="processBtn" onclick="processImage()" class="primary-btn">Generate</button>
                 </div>
+            </section>
 
-                <!-- Status Card -->
-                <div class="card status-card">
-                    <div class="card-header">Status</div>
-                    <div class="status-body">
-                        <div id="statusMessage" class="status-message">Ready</div>
-                        <div id="statusDetails" class="status-details"></div>
-                        
-                        <div id="progressContainer" class="progress-container hidden">
-                            <div id="progressBar" class="progress-bar"></div>
-                        </div>
-
-                        <div id="loadingSpinner" class="spinner hidden"></div>
-                        <button id="stopBtn" onclick="stopProcessing()" class="stop-btn hidden">Stop</button>
-                    </div>
+            <section>
+                <h2 class="rule-head">Run</h2>
+                <div class="run-row">
+                    <button id="processBtn" onclick="processImage()" class="btn primary run-btn">Generate</button>
+                    <button id="processThrBtn" onclick="processThr()" class="btn primary run-btn hidden" disabled>Generate preview</button>
+                    <button id="stopBtn" onclick="stopProcessing()" class="btn ghost hidden">Stop</button>
+                    <span id="loadingSpinner" class="spinner hidden" aria-hidden="true"></span>
                 </div>
-            </div>
+                <div class="status-row">
+                    <span id="statusMessage" class="status-badge">Ready</span>
+                </div>
+                <div id="statusDetails" class="status-details"></div>
+                <div id="progressContainer" class="progress-block hidden">
+                    <div class="progress-rule"><div id="progressBar" class="progress-rule-fill"></div></div>
+                </div>
+            </section>
 
-            <div class="right-col">
-                <div class="results-grid">
-                    <!-- 1. Detected Edges -->
-                    <div class="card result-card">
-                        <div class="card-header">1. Detected Edges</div>
-                        <div class="canvas-wrapper">
-                            <canvas id="edgesCanvas"></canvas>
-                        </div>
+            <section>
+                <h2 class="rule-head">Export</h2>
+                <div id="statsArea" class="hidden">
+                    <div class="fact"><span class="k">Points</span><span class="v"><span id="pointCount">0</span></span></div>
+                </div>
+                <div class="input-row">
+                    <input class="text-input" type="text" id="patternName" placeholder="Pattern name&hellip;" value="track" aria-label="Pattern name">
+                </div>
+                <div class="input-row">
+                    <input class="text-input" type="text" id="tableIp" placeholder="Table address (e.g. 192.168.1.100)" value="sisyphus.local" aria-label="Table address">
+                </div>
+                <div class="actions">
+                    <button id="downloadBtn" onclick="downloadThr()" disabled class="btn primary">Download .thr</button>
+                    <button id="uploadBtn" onclick="uploadToTable()" disabled class="btn">Send to table</button>
+                </div>
+                <div id="uploadProgressArea" class="upload-progress-area hidden">
+                    <div class="upload-progress-row">
+                        <span class="upload-progress-label">.thr</span>
+                        <div class="progress-rule"><div id="thrProgressBar" class="progress-rule-fill"></div></div>
                     </div>
-
-                    <!-- 2. Optimized Path -->
-                    <div class="card result-card">
-                        <div class="card-header">2. Path (blue &rarr; red)</div>
-                        <div class="canvas-wrapper">
-                            <canvas id="pathCanvas"></canvas>
-                        </div>
-                    </div>
-
-                    <!-- 3. Simulation -->
-                    <div class="card result-card">
-                        <div class="card-header">3. Simulation</div>
-                        <div class="canvas-wrapper sand-bg">
-                            <img id="gifOutput" class="hidden result-img" alt="Simulation">
-                        </div>
+                    <div class="upload-progress-row">
+                        <span class="upload-progress-label">.png</span>
+                        <div class="progress-rule"><div id="pngProgressBar" class="progress-rule-fill"></div></div>
                     </div>
                 </div>
+            </section>
+        </div>
 
-                <div class="download-footer">
-                    <div id="statsArea" class="stats hidden">
-                        <span id="pointCount">0</span> points
-                    </div>
-                    
-                    <div class="pattern-name-row">
-                        <label for="patternName">Pattern Name:</label>
-                        <input type="text" id="patternName" placeholder="Enter pattern name..." value="track">
-                    </div>
-
-                    <div class="action-buttons">
-                        <button id="downloadBtn" onclick="downloadThr()" disabled class="primary-btn download-btn">
-                            <span>📥</span> Download .thr
-                        </button>
-                        <div class="upload-group">
-                            <input type="text" id="tableIp" placeholder="Table IP (e.g. 192.168.1.100)" value="sisyphus.local">
-                            <button id="uploadBtn" onclick="uploadToTable()" disabled class="primary-btn upload-btn">
-                                <span>🚀</span> Upload to Table
-                            </button>
-                        </div>
-                    </div>
-
-                    <div id="uploadProgressArea" class="upload-progress-area hidden">
-                        <div class="upload-progress-row">
-                            <span class="upload-progress-label">.thr</span>
-                            <div class="progress-container">
-                                <div id="thrProgressBar" class="progress-bar"></div>
-                            </div>
-                        </div>
-                        <div class="upload-progress-row">
-                            <span class="upload-progress-label">.png</span>
-                            <div class="progress-container">
-                                <div id="pngProgressBar" class="progress-bar"></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div id="loadingOverlay" class="hidden">
-            </div>
-        </main>
-
-        <footer class="tips-section">
-            <h3>Tips:</h3>
+        <!-- ── Notes ── -->
+        <footer class="notes">
+            <h2 class="rule-head">Notes</h2>
             <ul>
-                <li>Use images with clear outlines on a contrasting background</li>
-                <li>Lower thresholds detect more edges (useful for faint lines)</li>
-                <li>The path visualization shows traversal order: blue (start) &rarr; red (end)</li>
-                <li>Blue dot marks the starting point (closest to center)</li>
+                <li>Images with clear outlines on a contrasting background work best.</li>
+                <li>Lower thresholds detect more edges &mdash; useful for faint lines.</li>
+                <li>The path stage shows traversal order: blue is the start (closest to center), red is the end.</li>
+                <li>Anything outside the table&rsquo;s inscribed circle is clamped to the rim.</li>
             </ul>
         </footer>
-    </div>
+    </main>
+
     <script src="script.js"></script>
 </body>
 </html>
